@@ -48,6 +48,7 @@ MIDDLEWARE = [
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:5173',
     'http://127.0.0.1:5173',
+    'https://frontend-smoky-xi-74.vercel.app',
 ]
 
 # Autorise automatiquement tous les sous-domaines Vercel (preview + prod)
@@ -61,7 +62,7 @@ CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = [
     'http://localhost:5173',
     'http://127.0.0.1:5173',
-    'https://*.vercel.app',
+    'https://frontend-smoky-xi-74.vercel.app',
 ]
 
 # ── Configuration des Sessions (Cookies Cross-Site) ──
