@@ -23,7 +23,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY')
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
-FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173')
+FRONTEND_URL = 'https://frontend-smoky-xi-74.vercel.app/'
 
 ALLOWED_HOSTS = ['*']
 
@@ -64,6 +64,7 @@ CORS_ALLOW_CREDENTIALS = True
 CSRF_TRUSTED_ORIGINS = [
     'http://localhost:5173',
     'http://127.0.0.1:5173',
+    'https://frontend-smoky-xi-74.vercel.app'
 ]
 
 # ── Sessions (équivalent express-session + connect-sqlite3) ──
