@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from .audit import reset_audit_actor, set_audit_actor
 from .models import (
-	AnneeScolaire, Classe, Eleve, Enseignement, Evaluation, Entree, Matiere, MoisEcolage,
+	AnneeScolaire, Classe, Eleve, Enseignement, Evaluation, Entree, Matiere, MoisEcolage, Salle,
 	Facture, FichePaieProf, JournalOperation, Note, Parametre, PointageProfesseur, Presence,
 	LocationBook, Professeur, TypePaiement,
 	Utilisateur,
@@ -57,6 +57,47 @@ class PresenceViewsTests(TestCase):
 
 		self.assertEqual(response.status_code, 400)
 		self.assertEqual(Presence.objects.count(), 0)
+
+
+class SallesAdminTests(TestCase):
+	def setUp(self):
+		self.admin = Utilisateur.objects.create(
+			prenom='Admin', nom='Salles', username='admin-salles', password='unused', role='admin'
+		)
+		session = self.client.session
+		session['user_id'] = self.admin.id
+		session.save()
+
+	def test_admin_can_create_and_list_salle(self):
+		response = self.client.post(
+			'/api/admin/salles/add',
+			data=json.dumps({'nom': 'Salle Crèche', 'niveau': 'Préscolaire'}),
+			content_type='application/json',
+		)
+
+		self.assertEqual(response.status_code, 201)
+		self.assertEqual(Salle.objects.count(), 1)
+
+		response = self.client.get('/api/admin/salles')
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.json()['salles'], [{
+			'id': Salle.objects.get().id,
+			'nom': 'Salle Crèche',
+			'niveau': 'Préscolaire',
+		}])
+
+	def test_duplicate_salle_in_same_category_is_rejected(self):
+		Salle.objects.create(nom='Salle Crèche', niveau='Préscolaire')
+
+		response = self.client.post(
+			'/api/admin/salles/add',
+			data=json.dumps({'nom': 'Salle Crèche', 'niveau': 'Préscolaire'}),
+			content_type='application/json',
+		)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(Salle.objects.count(), 1)
 
 
 class PointageProfesseurTests(TestCase):

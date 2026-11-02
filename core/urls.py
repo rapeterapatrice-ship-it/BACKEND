@@ -80,6 +80,10 @@ urlpatterns = [
     path('admin/classes/add', views_admin.classes_add_view),
     path('admin/classes/<int:classe_id>/edit', views_admin.classes_edit_view),
     path('admin/classes/<int:classe_id>', views_admin.classes_delete_view),
+    path('admin/salles', views_admin.salles_list_view),
+    path('admin/salles/add', views_admin.salles_add_view),
+    path('admin/salles/<int:salle_id>/edit', views_admin.salles_edit_view),
+    path('admin/salles/<int:salle_id>', views_admin.salles_delete_view),
 
     # ── Admin : années ──
     path('admin/annees', views_admin.annees_list_view),

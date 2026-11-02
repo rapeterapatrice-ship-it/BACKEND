@@ -3,9 +3,10 @@ from django.db.models import Sum
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .models import Utilisateur, Classe, AnneeScolaire, Entree, Sortie, Professeur, Enseignement
+from .models import Utilisateur, Classe, Salle, AnneeScolaire, Entree, Sortie, Professeur, Enseignement
 from .serializers import (
     UtilisateurSerializer, UtilisateurWriteSerializer, ClasseSerializer, ClasseWriteSerializer,
+    SalleSerializer, SalleWriteSerializer,
     AnneeScolaireStatsSerializer, AnneeScolaireAddSerializer,
 )
 from .auth import require_admin, hash_password
@@ -256,6 +257,46 @@ def classes_edit_view(request, classe_id):
 @require_admin
 def classes_delete_view(request, classe_id):
     Classe.objects.filter(id=classe_id).delete()
+    return Response({'ok': True})
+
+
+# ─────────────────────────── SALLES ───────────────────────────
+
+@api_view(['GET'])
+@require_admin
+def salles_list_view(request):
+    salles = Salle.objects.order_by('niveau', 'nom')
+    return Response({'salles': SalleSerializer(salles, many=True).data})
+
+
+@api_view(['POST'])
+@require_admin
+def salles_add_view(request):
+    payload = SalleWriteSerializer(data=request.data)
+    payload.is_valid(raise_exception=True)
+    payload.save()
+    return Response({'ok': True}, status=201)
+
+
+@api_view(['POST', 'PUT'])
+@require_admin
+def salles_edit_view(request, salle_id):
+    salle = Salle.objects.filter(id=salle_id).first()
+    if not salle:
+        return Response({'error': 'not_found'}, status=404)
+    payload = SalleWriteSerializer(salle, data=request.data)
+    payload.is_valid(raise_exception=True)
+    payload.save()
+    return Response({'ok': True})
+
+
+@api_view(['DELETE', 'POST'])
+@require_admin
+def salles_delete_view(request, salle_id):
+    salle = Salle.objects.filter(id=salle_id).first()
+    if not salle:
+        return Response({'error': 'not_found'}, status=404)
+    salle.delete()
     return Response({'ok': True})
 
 

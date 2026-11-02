@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
-from core.models import Utilisateur, AnneeScolaire, Classe, Eleve, Presence, TypePaiement, Parametre
+from core.models import Utilisateur, AnneeScolaire, Classe, Salle, Eleve, Presence, TypePaiement, Parametre
 from core.auth import hash_password
 
 
@@ -74,6 +74,12 @@ class Command(BaseCommand):
                 Classe.objects.create(nom=nom, niveau=niveau, tarif_inscription=ins, tarif_ecolage=eco,
                                        tarif_fascicule=fas, tarif_location=loc)
             self.stdout.write(self.style.SUCCESS('✓ Classes créées'))
+
+        for classe in Classe.objects.all():
+            Salle.objects.get_or_create(
+                nom=f'Salle {classe.nom}',
+                niveau=classe.niveau,
+            )
 
         annee = AnneeScolaire.objects.filter(courante=True).first()
         if annee:

@@ -22,7 +22,7 @@ On distingue deux familles de serializers :
 from rest_framework import serializers
 
 from .models import (
-    Utilisateur, AnneeScolaire, Classe, Eleve, MoisEcolage, TypePaiement,
+    Utilisateur, AnneeScolaire, Classe, Salle, Eleve, MoisEcolage, TypePaiement,
     Entree, Parametre, Sortie, CarnetFacturation, LocationBook, LettrePdf, Presence, Facture,
 )
 
@@ -76,6 +76,12 @@ class ClasseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Classe
         fields = ['id', 'nom', 'niveau', 'tarif_inscription', 'tarif_ecolage', 'tarif_fascicule', 'tarif_location']
+
+
+class SalleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Salle
+        fields = ['id', 'nom', 'niveau']
 
 
 class EleveSerializer(serializers.ModelSerializer):
@@ -179,6 +185,12 @@ class ClasseWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Classe
         fields = ['nom', 'niveau', 'tarif_inscription', 'tarif_ecolage', 'tarif_fascicule', 'tarif_location']
+
+
+class SalleWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Salle
+        fields = ['nom', 'niveau']
 
 
 class TypePaiementWriteSerializer(serializers.ModelSerializer):

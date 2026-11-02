@@ -48,6 +48,19 @@ class Classe(models.Model):
         return self.nom
 
 
+class Salle(models.Model):
+    nom = models.CharField(max_length=100)
+    niveau = models.CharField(max_length=100)
+
+    class Meta:
+        db_table = 'salles'
+        ordering = ['niveau', 'nom']
+        unique_together = ('nom', 'niveau')
+
+    def __str__(self):
+        return f'{self.nom} ({self.niveau})'
+
+
 class Eleve(models.Model):
     numero = models.CharField(max_length=50)
     prenom = models.CharField(max_length=150)
