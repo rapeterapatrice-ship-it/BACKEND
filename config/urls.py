@@ -3,10 +3,12 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from django.views.generic.base import RedirectView
+from core import views_parametres
 
 urlpatterns = [
     path('', RedirectView.as_view(url=settings.FRONTEND_URL, permanent=False)),
     path('django-admin/', admin.site.urls),
+    path('media/uploads/<str:filename>', views_parametres.logo_media_view),
     path('api/', include('core.urls')),
 ]
 

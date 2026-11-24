@@ -42,10 +42,14 @@ class UtilisateurSerializer(serializers.ModelSerializer):
 class UtilisateurWriteSerializer(serializers.ModelSerializer):
     """Création/édition d'un agent. Le mot de passe est géré à part (hash bcrypt, voir core/auth.py)."""
     password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    role = serializers.ChoiceField(
+        choices=(('agent', 'Agent financier'), ('surveillant', 'Surveillant')),
+        required=False,
+    )
 
     class Meta:
         model = Utilisateur
-        fields = ['id', 'prenom', 'nom', 'username', 'password']
+        fields = ['id', 'prenom', 'nom', 'username', 'password', 'role']
 
 
 class SessionUserSerializer(serializers.ModelSerializer):
@@ -65,8 +69,8 @@ class AnneeScolaireSerializer(serializers.ModelSerializer):
 class AnneeScolaireStatsSerializer(AnneeScolaireSerializer):
     """Année scolaire enrichie des totaux utilisés par la page Admin > Années."""
     nb_eleves = serializers.IntegerField()
-    total_entrees = serializers.IntegerField()
-    total_sorties = serializers.IntegerField()
+    total_entrees = serializers.DecimalField(max_digits=14, decimal_places=2)
+    total_sorties = serializers.DecimalField(max_digits=14, decimal_places=2)
 
     class Meta(AnneeScolaireSerializer.Meta):
         fields = AnneeScolaireSerializer.Meta.fields + ['nb_eleves', 'total_entrees', 'total_sorties']
@@ -100,6 +104,10 @@ class TypePaiementSerializer(serializers.ModelSerializer):
 class EntreeSerializer(serializers.ModelSerializer):
     numero_facture = serializers.SerializerMethodField()
     telephone_etablissement = serializers.SerializerMethodField()
+    im_eleve = serializers.SerializerMethodField()
+
+    def get_im_eleve(self, obj):
+        return obj.eleve.numero if obj.eleve else ''
 
     def get_numero_facture(self, obj):
         try:
@@ -117,13 +125,15 @@ class EntreeSerializer(serializers.ModelSerializer):
         model = Entree
         fields = ['id', 'numero', 'date', 'type', 'eleve_nom', 'classe_nom',
                   'description', 'montant', 'mois_index', 'numero_facture',
-                  'telephone_etablissement']
+                  'telephone_etablissement', 'im_eleve']
 
 
 class SortieSerializer(serializers.ModelSerializer):
+    fiche_paie_id = serializers.IntegerField(read_only=True)
+
     class Meta:
         model = Sortie
-        fields = ['id', 'numero', 'date', 'motif', 'montant']
+        fields = ['id', 'numero', 'date', 'motif', 'montant', 'fiche_paie_id']
 
 
 class LocationBookSerializer(serializers.ModelSerializer):
@@ -178,7 +188,7 @@ class ChangePasswordSerializer(serializers.Serializer):
 
 class SortieAddSerializer(serializers.Serializer):
     motif = serializers.CharField()
-    montant = serializers.IntegerField(min_value=1)
+    montant = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=1)
 
 
 class ClasseWriteSerializer(serializers.ModelSerializer):
@@ -275,6 +285,7 @@ class FactureSerializer(serializers.Serializer):
     """Structure du reçu affiché dans la modale d'aperçu / impression (frontend React)."""
     titre = serializers.CharField()
     numero = serializers.CharField(allow_null=True)
+    im_eleve = serializers.CharField(required=False, allow_blank=True)
     date = serializers.CharField()
     prenom = serializers.CharField()
     nom = serializers.CharField()

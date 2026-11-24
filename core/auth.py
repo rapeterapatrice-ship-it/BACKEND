@@ -41,6 +41,32 @@ def require_auth(view_func):
     return wrapper
 
 
+def require_school_staff(view_func):
+    @functools.wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        user = get_current_user(request)
+        if not user:
+            return Response({'error': 'Non authentifié'}, status=401)
+        if user.role not in ('admin', 'surveillant'):
+            return Response({'error': 'Accès réservé à l’administrateur et au surveillant'}, status=403)
+        request.current_user = user
+        return view_func(request, *args, **kwargs)
+    return wrapper
+
+
+def require_school_staff_or_teacher(view_func):
+    @functools.wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        user = get_current_user(request)
+        if not user:
+            return Response({'error': 'Non authentifié'}, status=401)
+        if user.role not in ('admin', 'surveillant', 'professeur'):
+            return Response({'error': 'Accès réservé au personnel scolaire'}, status=403)
+        request.current_user = user
+        return view_func(request, *args, **kwargs)
+    return wrapper
+
+
 def require_academic_auth(view_func):
     """Authentifie tout utilisateur pour les fonctions académiques autorisées par rôle."""
     @functools.wraps(view_func)
@@ -48,6 +74,19 @@ def require_academic_auth(view_func):
         user = get_current_user(request)
         if not user:
             return Response({'error': 'Non authentifié'}, status=401)
+        request.current_user = user
+        return view_func(request, *args, **kwargs)
+    return wrapper
+
+
+def require_parent(view_func):
+    @functools.wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        user = get_current_user(request)
+        if not user:
+            return Response({'error': 'Non authentifié'}, status=401)
+        if user.role != 'parent':
+            return Response({'error': 'Accès réservé aux parents'}, status=403)
         request.current_user = user
         return view_func(request, *args, **kwargs)
     return wrapper

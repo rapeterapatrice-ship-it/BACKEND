@@ -2,12 +2,16 @@ from django.db import models
 
 
 class Utilisateur(models.Model):
-    ROLE_CHOICES = (('admin', 'admin'), ('agent', 'agent'), ('professeur', 'professeur'))
+    ROLE_CHOICES = (
+        ('admin', 'admin'), ('agent', 'agent'),
+        ('surveillant', 'surveillant'), ('professeur', 'professeur'),
+        ('parent', 'parent'),
+    )
     prenom = models.CharField(max_length=150)
     nom = models.CharField(max_length=150)
     username = models.CharField(max_length=150, unique=True)
     password = models.CharField(max_length=255)  # hash bcrypt
-    role = models.CharField(max_length=10, choices=ROLE_CHOICES)
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES)
     actif = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -78,6 +82,21 @@ class Eleve(models.Model):
 
     def __str__(self):
         return f'{self.nom} {self.prenom}'
+
+
+class LienParentEleve(models.Model):
+    parent = models.ForeignKey(
+        Utilisateur, on_delete=models.CASCADE, related_name='liens_eleves',
+        db_column='parent_id',
+    )
+    eleve = models.ForeignKey(
+        Eleve, on_delete=models.CASCADE, related_name='liens_parents',
+        db_column='eleve_id',
+    )
+
+    class Meta:
+        db_table = 'liens_parent_eleves'
+        unique_together = ('parent', 'eleve')
 
 
 class MoisEcolage(models.Model):
@@ -169,8 +188,12 @@ class Sortie(models.Model):
     numero = models.CharField(max_length=50)
     date = models.CharField(max_length=20)
     motif = models.CharField(max_length=255)
-    montant = models.IntegerField()
+    montant = models.DecimalField(max_digits=12, decimal_places=2)
     agent = models.ForeignKey(Utilisateur, on_delete=models.SET_NULL, null=True, blank=True, db_column='agent_id')
+    fiche_paie = models.OneToOneField(
+        'FichePaieProf', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='sortie',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -385,6 +408,7 @@ class Evaluation(models.Model):
         ('trimestre_3', 'Trimestre 3'),
         ('semestre_1', 'Semestre 1'),
         ('semestre_2', 'Semestre 2'),
+        ('semestre_3', 'Semestre 3'),
     )
 
     enseignement = models.ForeignKey(

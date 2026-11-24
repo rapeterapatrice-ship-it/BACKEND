@@ -18,6 +18,8 @@ urlpatterns = [
     # ── Site public ──
     path('site-web', views_site.site_web_public_view),
     path('admin/site-web', views_site.site_web_admin_view),
+    path('admin/site-web/actualites/image', views_site.site_web_actualite_image_upload_view),
+    path('media/actualites/<str:filename>', views_site.site_web_actualite_image_view),
 
     # ── Dashboard ──
     path('dashboard', views_dashboard.dashboard_view),
@@ -41,6 +43,7 @@ urlpatterns = [
     # ── Sorties ──
     path('sortie', views_sortie.sortie_list_view),
     path('sortie/add', views_sortie.sortie_add_view),
+    path('sortie/<int:sortie_id>/edit', views_sortie.sortie_edit_view),
     path('sortie/<int:sortie_id>', views_sortie.sortie_delete_view),
 
     # ── État de compte ──
@@ -74,6 +77,11 @@ urlpatterns = [
     path('admin/professeurs/<int:professeur_id>/edit', views_admin.professeurs_save_view),
     path('admin/professeurs/<int:professeur_id>/toggle', views_admin.professeurs_toggle_view),
     path('admin/professeurs/<int:professeur_id>', views_admin.professeurs_delete_view),
+    path('admin/parents', views_admin.parents_list_view),
+    path('admin/parents/add', views_admin.parents_save_view),
+    path('admin/parents/<int:parent_id>/edit', views_admin.parents_save_view),
+    path('admin/parents/<int:parent_id>/toggle', views_admin.parents_toggle_view),
+    path('admin/parents/<int:parent_id>', views_admin.parents_delete_view),
 
     # ── Admin : classes ──
     path('admin/classes', views_admin.classes_list_view),
@@ -107,8 +115,10 @@ urlpatterns = [
     path('admin/parametres/nom', views_parametres.parametres_nom_view),
     path('admin/parametres/telephone', views_parametres.parametres_telephone_view),
     path('admin/parametres/theme', views_parametres.parametres_theme_view),
+    path('admin/parametres/pause-recreation', views_parametres.parametres_pause_recreation_view),
     path('admin/parametres/logo', views_parametres.parametres_logo_view),
     path('admin/parametres/logo/delete', views_parametres.parametres_logo_delete_view),
+    path('media/uploads/<str:filename>', views_parametres.logo_media_view),
     path('admin/parametres/retards', views_parametres.parametres_retards_view),
     path('admin/parametres/retards/update', views_parametres.parametres_retards_update_view),
 
@@ -116,6 +126,7 @@ urlpatterns = [
     path('presences/feuille', views_presences.feuille_view),
     path('presences/enregistrer', views_presences.enregistrer_view),
     path('presences/grille', views_presences.grille_view),
+    path('parent/presences', views_presences.presences_parent_view),
 
     # ── Pointage des professeurs ──
     path('pointages/feuille', views_pointages.feuille_pointages_view),
@@ -132,6 +143,7 @@ urlpatterns = [
     path('academique/configuration', views_notes.configuration_notes_view),
     path('academique/eleves', views_notes.rechercher_eleves_notes_view),
     path('academique/notes', views_notes.enregistrer_note_view),
+    path('academique/notes/importer', views_notes.importer_notes_view),
     path('academique/bulletin', views_notes.bulletin_eleve_view),
     
     # ── Endpoints utilitaires (ex api.js) ──

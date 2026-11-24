@@ -65,7 +65,7 @@ def location_livres_apercu_view(request):
                      'num_location': num_loc, 'annee_id': annee.id, 'facture_id': facture.id},
         'facture': {
             'titre': 'REÇU LOCATION DE LIVRES', 'numero': facture.numero, 'date': today_fr(),
-            'prenom': eleve.prenom, 'nom': eleve.nom, 'classe': classe.nom,
+            'prenom': eleve.prenom, 'nom': eleve.nom, 'im_eleve': eleve.numero, 'classe': classe.nom,
             'type': f"Location de livres ({d['quantite']} livre(s) × {d['montant_unitaire']} Ar)",
             'montant': montant_total, 'annee': annee.libelle,
             'etablissement': get_param('nom_etablissement', 'EduFinance'), 'logo': get_param('logo_url', ''),

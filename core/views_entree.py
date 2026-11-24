@@ -20,24 +20,24 @@ TYPE_LABELS = {'inscription': 'Inscription', 'reinscription': 'Réinscription', 
 def _annee_im(annee):
     match = re.match(r'^\s*(\d{4})', annee.libelle or '')
     if match:
-        return match.group(1)
+        return match.group(1)[-2:]
     if annee.debut:
         try:
-            return datetime.strptime(annee.debut[:10], '%Y-%m-%d').strftime('%Y')
+            return datetime.strptime(annee.debut[:10], '%Y-%m-%d').strftime('%y')
         except ValueError:
             pass
-    return datetime.now().strftime('%Y')
+    return datetime.now().strftime('%y')
 
 
 def _prochain_im(annee):
     prefixe = _annee_im(annee)
-    pattern = re.compile(rf'^{re.escape(prefixe)}-(\d{{4,}})$')
+    pattern = re.compile(rf'^{re.escape(prefixe)}(\d{{4,}})$')
     dernier_numero = 0
-    for numero in Eleve.objects.filter(numero__startswith=f'{prefixe}-').values_list('numero', flat=True):
+    for numero in Eleve.objects.filter(numero__startswith=prefixe).values_list('numero', flat=True):
         match = pattern.fullmatch(numero)
         if match:
             dernier_numero = max(dernier_numero, int(match.group(1)))
-    return f'{prefixe}-{dernier_numero + 1:04d}'
+    return f'{prefixe}{dernier_numero + 1:04d}'
 
 
 @api_view(['GET'])
@@ -47,7 +47,7 @@ def entree_list_view(request):
     if not annee:
         return Response({'entrees': [], 'classes': [], 'types': [], 'preview': None, 'modifier': False})
 
-    entrees = Entree.objects.filter(annee=annee).select_related('facture').order_by('-created_at')
+    entrees = Entree.objects.filter(annee=annee).select_related('facture', 'eleve').order_by('-created_at')
     classes = Classe.objects.all().order_by('niveau', 'nom')
     types = TypePaiement.objects.filter(actif=True).order_by('nom')
 
@@ -179,7 +179,8 @@ def apercu_inscription_view(request):
         },
         'facture': {
             'titre': "REÇU D'INSCRIPTION" if type_ == 'inscription' else "REÇU DE RÉINSCRIPTION",
-            'numero': facture.numero, 'date': format_date_fr(date_ins), 'prenom': prenom.strip(), 'nom': nom.strip(),
+            'numero': facture.numero, 'date': format_date_fr(date_ins), 'im_eleve': numero,
+            'prenom': prenom.strip(), 'nom': nom.strip(),
             'classe': f'{classe.nom} ({classe.niveau})',
             'type': 'Inscription' if type_ == 'inscription' else 'Réinscription',
             'montant': montant, 'annee': annee.libelle,
@@ -243,7 +244,7 @@ def apercu_ecolage_view(request):
                      'facture_id': facture.id},
         'facture': {
             'titre': 'REÇU DE PAIEMENT', 'numero': facture.numero, 'date': format_date_fr(date_paiement_final),
-            'prenom': eleve.prenom, 'nom': eleve.nom, 'classe': classe.nom,
+            'prenom': eleve.prenom, 'nom': eleve.nom, 'im_eleve': eleve.numero, 'classe': classe.nom,
             'type': f'{type_nom} — {mois_noms}', 'montant': total, 'annee': annee.libelle,
             'etablissement': get_param('nom_etablissement', 'EduFinance'), 'logo': get_param('logo_url', ''),
             'telephone': facture.telephone_etablissement,
@@ -286,7 +287,8 @@ def apercu_fascicule_view(request):
                      'facture_id': facture.id},
         'facture': {
             'titre': 'REÇU FASCICULE' if payment_type == 'fascicule' else 'REÇU LOCATION',
-            'numero': facture.numero, 'date': format_date_fr(date_paiement_f), 'prenom': eleve.prenom, 'nom': eleve.nom,
+            'numero': facture.numero, 'date': format_date_fr(date_paiement_f),
+            'im_eleve': eleve.numero, 'prenom': eleve.prenom, 'nom': eleve.nom,
             'classe': classe.nom,
             'type': 'Fascicule (annuel)' if payment_type == 'fascicule' else 'Location (annuelle)',
             'montant': montant, 'annee': annee.libelle,
@@ -336,7 +338,8 @@ def apercu_type_paiement_view(request):
                      'facture_id': facture.id},
         'facture': {
             'titre': 'REÇU ' + type_paiement.nom.upper(), 'numero': facture.numero, 'date': format_date_fr(date_paiement_f),
-            'prenom': eleve.prenom, 'nom': eleve.nom, 'classe': classe.nom, 'type': type_paiement.nom,
+            'prenom': eleve.prenom, 'nom': eleve.nom, 'im_eleve': eleve.numero,
+            'classe': classe.nom, 'type': type_paiement.nom,
             'montant': montant, 'annee': annee.libelle,
             'etablissement': get_param('nom_etablissement', 'EduFinance'), 'logo': get_param('logo_url', ''),
             'telephone': facture.telephone_etablissement,
@@ -394,7 +397,7 @@ def entree_valider_view(request):
                     if not is_valid_person_name(prenom) or not is_valid_person_name(nom):
                         raise ValueError('Nom ou prénom invalide')
                     expected_prefix = _annee_im(annee)
-                    if not re.fullmatch(rf'{re.escape(expected_prefix)}-\d{{4,}}', sd['numero']):
+                    if not re.fullmatch(rf'{re.escape(expected_prefix)}\d{{4,}}', sd['numero']):
                         raise ValueError('IM invalide. Recommencez l’inscription.')
                     if Eleve.objects.filter(numero=sd['numero']).exists():
                         raise ValueError('Cet IM vient d’être attribué. Recommencez l’inscription.')

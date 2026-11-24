@@ -1,8 +1,14 @@
 import json
+import os
+import re
+import uuid
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from rest_framework.decorators import api_view
+from django.http import FileResponse, Http404
+from rest_framework.decorators import api_view, parser_classes
+from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
 
 from .auth import require_admin
@@ -34,6 +40,12 @@ TEXT_LIMITS = {
     'contactEmail': 254,
     'contactTelephone': 50,
 }
+NEWS_IMAGE_PATTERN = re.compile(r'^/api/media/actualites/([a-f0-9]{32}\.(?:png|jpe?g|webp))$')
+
+
+def _news_image_filename(url):
+    match = NEWS_IMAGE_PATTERN.fullmatch(url or '')
+    return match.group(1) if match else None
 
 
 def _site_config():
@@ -84,6 +96,13 @@ def _validate_site_config(data):
             if len(value) > limit:
                 return None, {'error': f'Le champ « {key} » de l’actualité {index + 1} est trop long.'}
             article[key] = value
+        if 'image' in item:
+            image = item['image']
+            if not isinstance(image, str) or len(image) > 255:
+                return None, {'error': f'L’image de l’actualité {index + 1} est invalide.'}
+            article['image'] = image.strip()
+            if article['image'] and not _news_image_filename(article['image']):
+                return None, {'error': f'L’image de l’actualité {index + 1} est invalide.'}
         if not article['titre']:
             return None, {'error': f'Le titre de l’actualité {index + 1} est obligatoire.'}
         config['actualites'].append(article)
@@ -117,5 +136,68 @@ def site_web_admin_view(request):
     if error:
         return Response(error, status=400)
 
+    previous_config = _site_config()
     set_param('site_web_config', json.dumps(config, ensure_ascii=False))
+    retained_images = {
+        article['image'] for article in config['actualites'] if article.get('image')
+    }
+    upload_dir = os.path.join(settings.MEDIA_ROOT, 'uploads', 'actualites')
+    for article in previous_config.get('actualites', []):
+        filename = _news_image_filename(article.get('image'))
+        if filename and article.get('image') not in retained_images:
+            try:
+                os.remove(os.path.join(upload_dir, filename))
+            except FileNotFoundError:
+                pass
     return Response(config)
+
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser])
+@require_admin
+def site_web_actualite_image_upload_view(request):
+    image = request.FILES.get('image')
+    if not image:
+        return Response({'error': 'Sélectionnez une image à téléverser.'}, status=400)
+
+    extension = os.path.splitext(image.name)[1].lower()
+    signatures = {
+        '.png': lambda data: data.startswith(b'\x89PNG\r\n\x1a\n'),
+        '.jpg': lambda data: data.startswith(b'\xff\xd8\xff'),
+        '.jpeg': lambda data: data.startswith(b'\xff\xd8\xff'),
+        '.webp': lambda data: len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP',
+    }
+    image.seek(0)
+    header = image.read(12)
+    image.seek(0)
+    if extension not in signatures or not signatures[extension](header):
+        return Response({'error': 'Format invalide. Utilisez une image PNG, JPG ou WebP.'}, status=400)
+
+    filename = f'{uuid.uuid4().hex}{extension}'
+    upload_dir = os.path.join(settings.MEDIA_ROOT, 'uploads', 'actualites')
+    os.makedirs(upload_dir, exist_ok=True)
+    with open(os.path.join(upload_dir, filename), 'wb') as destination:
+        for chunk in image.chunks():
+            destination.write(chunk)
+
+    return Response({'image': f'/api/media/actualites/{filename}'})
+
+
+@api_view(['GET'])
+def site_web_actualite_image_view(request, filename):
+    if not re.fullmatch(r'[a-f0-9]{32}\.(?:png|jpe?g|webp)', filename):
+        raise Http404
+    image_path = os.path.join(settings.MEDIA_ROOT, 'uploads', 'actualites', filename)
+    if not os.path.isfile(image_path):
+        raise Http404
+    content_types = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.webp': 'image/webp',
+    }
+    extension = os.path.splitext(filename)[1]
+    response = FileResponse(open(image_path, 'rb'), content_type=content_types[extension])
+    response['X-Content-Type-Options'] = 'nosniff'
+    response['Cache-Control'] = 'public, max-age=3600'
+    return response

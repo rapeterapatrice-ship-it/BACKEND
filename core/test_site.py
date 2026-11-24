@@ -1,6 +1,9 @@
 import json
+import os
+import tempfile
 
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 
 from .models import Classe, Parametre, Utilisateur
 
@@ -79,3 +82,91 @@ class AdminSiteConfigTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertFalse(Parametre.objects.filter(cle='site_web_config').exists())
+
+    def test_admin_can_upload_and_publish_news_image(self):
+        self.login_as_admin()
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                upload = SimpleUploadedFile(
+                    'actualite.png', b'\x89PNG\r\n\x1a\nimage-data', content_type='image/png',
+                )
+                response = self.client.post(
+                    '/api/admin/site-web/actualites/image', {'image': upload},
+                )
+
+                self.assertEqual(response.status_code, 200)
+                image_url = response.json()['image']
+                self.assertRegex(image_url, r'^/api/media/actualites/[a-f0-9]{32}\.png$')
+                served_image = self.client.get(image_url)
+                self.assertEqual(served_image.status_code, 200)
+                served_image.close()
+
+                config = {
+                    'actualites': [{
+                        'titre': 'Rentrée scolaire',
+                        'image': image_url,
+                    }],
+                }
+                saved = self.client.post(
+                    '/api/admin/site-web',
+                    data=json.dumps(config),
+                    content_type='application/json',
+                )
+                self.assertEqual(saved.status_code, 200)
+                self.assertEqual(
+                    self.client.get('/api/site-web').json()['config']['actualites'][0]['image'],
+                    image_url,
+                )
+
+                removed = self.client.post(
+                    '/api/admin/site-web',
+                    data=json.dumps({'actualites': []}),
+                    content_type='application/json',
+                )
+                self.assertEqual(removed.status_code, 200)
+                self.assertFalse(os.path.exists(
+                    os.path.join(media_root, 'uploads', 'actualites', os.path.basename(image_url)),
+                ))
+
+    def test_news_image_upload_rejects_unauthorized_and_invalid_files(self):
+        self.assertEqual(
+            self.client.post(
+                '/api/admin/site-web/actualites/image',
+                {'image': SimpleUploadedFile('image.png', b'\x89PNG\r\n\x1a\ndata')},
+            ).status_code,
+            403,
+        )
+        self.login_as_admin()
+        invalid = self.client.post(
+            '/api/admin/site-web/actualites/image',
+            {'image': SimpleUploadedFile('image.png', b'<html>not an image</html>')},
+        )
+        self.assertEqual(invalid.status_code, 400)
+
+    def test_news_image_upload_accepts_large_images(self):
+        self.login_as_admin()
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                upload = SimpleUploadedFile(
+                    'actualite.png',
+                    b'\x89PNG\r\n\x1a\n' + b'a' * (7 * 1024 * 1024),
+                    content_type='image/png',
+                )
+                response = self.client.post(
+                    '/api/admin/site-web/actualites/image', {'image': upload},
+                )
+
+                self.assertEqual(response.status_code, 200, response.content)
+
+    def test_admin_cannot_publish_external_news_image_url(self):
+        self.login_as_admin()
+        response = self.client.post(
+            '/api/admin/site-web',
+            data=json.dumps({'actualites': [{
+                'titre': 'Rentrée scolaire',
+                'image': 'https://example.com/image.png',
+            }]}),
+            content_type='application/json',
+        )
+
+        self.assertEqual(response.status_code, 400)

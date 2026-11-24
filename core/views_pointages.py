@@ -3,13 +3,15 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from django.db import transaction
+from django.core.exceptions import ObjectDoesNotExist
 from django.utils import timezone
 from django.utils.dateparse import parse_date
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .auth import require_auth
+from .auth import require_school_staff, require_school_staff_or_teacher
 from .models import PointageProfesseur, Professeur
+from .pointage import duree_travail_minutes, pause_recreation
 
 POINTAGE_TIME_ZONE = ZoneInfo('Indian/Antananarivo')
 STATUTS_POINTAGE = {value for value, _ in PointageProfesseur.STATUT_CHOICES}
@@ -19,28 +21,27 @@ def parse_pointage_date(value):
     return parse_date(value) if isinstance(value, str) else None
 
 
-def _pointage_data(pointage):
+def _pointage_data(pointage, pause):
     return {
         'id': pointage.id,
         'date': pointage.date.isoformat(),
         'statut': pointage.statut,
         'heure_entree': pointage.heure_entree.strftime('%H:%M') if pointage.heure_entree else None,
         'heure_sortie': pointage.heure_sortie.strftime('%H:%M') if pointage.heure_sortie else None,
-        'duree_minutes': (
-            int((datetime.combine(pointage.date, pointage.heure_sortie) -
-                 datetime.combine(pointage.date, pointage.heure_entree)).total_seconds() // 60)
-            if pointage.heure_entree and pointage.heure_sortie else None
+        'duree_minutes': duree_travail_minutes(
+            pointage.date, pointage.heure_entree, pointage.heure_sortie, pause,
         ),
     }
 
 
 @api_view(['GET'])
-@require_auth
+@require_school_staff_or_teacher
 def feuille_pointages_view(request):
     mois_param = request.query_params.get('mois')
+    pause = pause_recreation()
     if mois_param:
-        if request.current_user.role != 'admin':
-            return Response({'error': 'La feuille mensuelle est réservée aux administrateurs'}, status=403)
+        if request.current_user.role not in ('admin', 'surveillant', 'professeur'):
+            return Response({'error': 'Accès à la feuille mensuelle refusé'}, status=403)
         try:
             debut_mois = datetime.strptime(mois_param, '%Y-%m').date()
             if debut_mois.strftime('%Y-%m') != mois_param:
@@ -53,17 +54,35 @@ def feuille_pointages_view(request):
             f'{debut_mois.year:04d}-{debut_mois.month:02d}-{jour:02d}'
             for jour in range(1, dernier_jour + 1)
         ]
-        professeurs = list(
-            Professeur.objects.filter(actif=True).order_by('nom', 'prenom')
-        )
+        if request.current_user.role == 'professeur':
+            try:
+                professeur_courant = request.current_user.profil_professeur
+            except ObjectDoesNotExist:
+                return Response({
+                    'mois': mois_param,
+                    'jours': jours,
+                    'professeurs': [],
+                    'total': 0,
+                    'pointes': 0,
+                    'peutModifier': False,
+                })
+            if not professeur_courant.actif:
+                professeurs = []
+            else:
+                professeurs = [professeur_courant]
+        else:
+            professeurs = list(
+                Professeur.objects.filter(actif=True).order_by('nom', 'prenom')
+            )
         pointages = PointageProfesseur.objects.filter(
             date__gte=debut_mois,
             date__lte=debut_mois.replace(day=dernier_jour),
             professeur__actif=True,
+            professeur_id__in=[professeur.id for professeur in professeurs],
         ).select_related('professeur')
         par_professeur = {professeur.id: {} for professeur in professeurs}
         for pointage in pointages:
-            par_professeur[pointage.professeur_id][pointage.date.isoformat()] = _pointage_data(pointage)
+            par_professeur[pointage.professeur_id][pointage.date.isoformat()] = _pointage_data(pointage, pause)
 
         lignes = []
         for professeur in professeurs:
@@ -87,8 +106,8 @@ def feuille_pointages_view(request):
             'peutModifier': False,
         })
 
-    if request.current_user.role != 'agent':
-        return Response({'error': 'L’opération de pointage est réservée aux agents'}, status=403)
+    if request.current_user.role != 'surveillant':
+        return Response({'error': 'Le pointage journalier est réservé au surveillant'}, status=403)
 
     date_param = request.query_params.get('date')
     date = parse_pointage_date(date_param) if date_param else timezone.localdate(
@@ -111,7 +130,7 @@ def feuille_pointages_view(request):
             'professeur_id': professeur.id,
             'nom': professeur.nom,
             'prenom': professeur.prenom,
-            'pointage': _pointage_data(pointage) if pointage else None,
+            'pointage': _pointage_data(pointage, pause) if pointage else None,
         })
 
     est_aujourd_hui = date == timezone.localdate(timezone=POINTAGE_TIME_ZONE)
@@ -121,15 +140,16 @@ def feuille_pointages_view(request):
         'total': len(lignes),
         'pointes': sum(1 for ligne in lignes if ligne['pointage']),
         'peutModifier': est_aujourd_hui,
+        'pauseRecreation': pause,
     })
 
 
 @api_view(['POST'])
-@require_auth
+@require_school_staff
 def enregistrer_pointage_view(request):
     utilisateur = request.current_user
-    if utilisateur.role != 'agent':
-        return Response({'error': 'Seuls les agents peuvent enregistrer les pointages'}, status=403)
+    if utilisateur.role != 'surveillant':
+        return Response({'error': 'Seul le surveillant peut enregistrer les pointages'}, status=403)
     date = parse_pointage_date(request.data.get('date', ''))
     lignes = request.data.get('lignes')
     if not date:

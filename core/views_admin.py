@@ -3,7 +3,10 @@ from django.db.models import Sum
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .models import Utilisateur, Classe, Salle, AnneeScolaire, Entree, Sortie, Professeur, Enseignement
+from .models import (
+    Utilisateur, Classe, Salle, AnneeScolaire, Entree, Sortie, Professeur, Enseignement,
+    Eleve, LienParentEleve,
+)
 from .serializers import (
     UtilisateurSerializer, UtilisateurWriteSerializer, ClasseSerializer, ClasseWriteSerializer,
     SalleSerializer, SalleWriteSerializer,
@@ -167,7 +170,7 @@ def professeurs_delete_view(request, professeur_id):
 @api_view(['GET'])
 @require_admin
 def agents_list_view(request):
-    agents = Utilisateur.objects.filter(role='agent').order_by('nom')
+    agents = Utilisateur.objects.filter(role__in=('agent', 'surveillant')).order_by('role', 'nom')
     return Response({'agents': UtilisateurSerializer(agents, many=True).data})
 
 
@@ -180,7 +183,8 @@ def agents_add_view(request):
     try:
         Utilisateur.objects.create(
             prenom=d['prenom'], nom=d['nom'], username=d['username'],
-            password=hash_password(d.get('password') or 'agent123'), role='agent', actif=True,
+            password=hash_password(d.get('password') or 'agent123'),
+            role=d.get('role', 'agent'), actif=True,
         )
         return Response({'ok': True})
     except IntegrityError:
@@ -190,7 +194,7 @@ def agents_add_view(request):
 @api_view(['POST', 'PUT'])
 @require_admin
 def agents_edit_view(request, agent_id):
-    agent = Utilisateur.objects.filter(id=agent_id, role='agent').first()
+    agent = Utilisateur.objects.filter(id=agent_id, role__in=('agent', 'surveillant')).first()
     if not agent:
         return Response({'error': 'not_found'}, status=404)
 
@@ -200,6 +204,7 @@ def agents_edit_view(request, agent_id):
     agent.prenom = d.get('prenom', agent.prenom)
     agent.nom = d.get('nom', agent.nom)
     agent.username = d.get('username', agent.username)
+    agent.role = d.get('role', agent.role)
     if d.get('password'):
         agent.password = hash_password(d['password'])
     agent.save()
@@ -209,7 +214,7 @@ def agents_edit_view(request, agent_id):
 @api_view(['POST'])
 @require_admin
 def agents_toggle_view(request, agent_id):
-    agent = Utilisateur.objects.filter(id=agent_id).first()
+    agent = Utilisateur.objects.filter(id=agent_id, role__in=('agent', 'surveillant')).first()
     if agent:
         agent.actif = not agent.actif
         agent.save()
@@ -219,7 +224,118 @@ def agents_toggle_view(request, agent_id):
 @api_view(['DELETE', 'POST'])
 @require_admin
 def agents_delete_view(request, agent_id):
-    Utilisateur.objects.filter(id=agent_id, role='agent').delete()
+    Utilisateur.objects.filter(id=agent_id, role__in=('agent', 'surveillant')).delete()
+    return Response({'ok': True})
+
+
+# ─────────────────────────── PARENTS ─────────────────────────────
+
+@api_view(['GET'])
+@require_admin
+def parents_list_view(request):
+    annee = get_annee_courante()
+    parents = Utilisateur.objects.filter(role='parent').order_by('nom', 'prenom')
+    eleves = Eleve.objects.filter(annee=annee).select_related('classe').order_by(
+        'classe__nom', 'nom', 'prenom'
+    ) if annee else Eleve.objects.none()
+    return Response({
+        'parents': [{
+            'id': parent.id,
+            'prenom': parent.prenom,
+            'nom': parent.nom,
+            'username': parent.username,
+            'actif': parent.actif,
+            'eleve_ids': list(parent.liens_eleves.values_list('eleve_id', flat=True)),
+        } for parent in parents],
+        'eleves': [{
+            'id': eleve.id,
+            'numero': eleve.numero,
+            'prenom': eleve.prenom,
+            'nom': eleve.nom,
+            'classe': eleve.classe.nom,
+        } for eleve in eleves],
+    })
+
+
+@api_view(['POST'])
+@require_admin
+def parents_save_view(request, parent_id=None):
+    prenom = str(request.data.get('prenom', '')).strip()
+    nom = str(request.data.get('nom', '')).strip()
+    username = str(request.data.get('username', '')).strip()
+    password = request.data.get('password', '')
+    eleve_ids = request.data.get('eleve_ids')
+    if not prenom or not nom or not username:
+        return Response({'error': 'Le nom, le prénom et l’identifiant sont obligatoires'}, status=400)
+    if not isinstance(eleve_ids, list) or not eleve_ids:
+        return Response({'error': 'Sélectionnez au moins un élève'}, status=400)
+    if parent_id is None and (not isinstance(password, str) or len(password) < 6):
+        return Response({'error': 'Le mot de passe doit contenir au moins 6 caractères'}, status=400)
+    if password and (not isinstance(password, str) or len(password) < 6):
+        return Response({'error': 'Le mot de passe doit contenir au moins 6 caractères'}, status=400)
+
+    annee = get_annee_courante()
+    if not annee:
+        return Response({'error': 'Aucune année scolaire active'}, status=400)
+    try:
+        eleve_ids = [int(value) for value in eleve_ids]
+    except (TypeError, ValueError):
+        return Response({'error': 'Sélection d’élèves invalide'}, status=400)
+    eleves = list(Eleve.objects.filter(id__in=set(eleve_ids), annee=annee))
+    if len(eleves) != len(set(eleve_ids)):
+        return Response({'error': 'Un ou plusieurs élèves sont introuvables pour l’année active'}, status=400)
+
+    try:
+        with transaction.atomic():
+            if parent_id is None:
+                if Utilisateur.objects.filter(username=username).exists():
+                    return Response({'error': 'Cet identifiant est déjà utilisé'}, status=409)
+                parent = Utilisateur.objects.create(
+                    prenom=prenom, nom=nom, username=username,
+                    password=hash_password(password), role='parent', actif=True,
+                )
+            else:
+                parent = Utilisateur.objects.select_for_update().filter(
+                    id=parent_id, role='parent',
+                ).first()
+                if not parent:
+                    return Response({'error': 'Compte parent introuvable'}, status=404)
+                if Utilisateur.objects.filter(username=username).exclude(id=parent.id).exists():
+                    return Response({'error': 'Cet identifiant est déjà utilisé'}, status=409)
+                parent.prenom = prenom
+                parent.nom = nom
+                parent.username = username
+                if password:
+                    parent.password = hash_password(password)
+                parent.save(update_fields=['prenom', 'nom', 'username', 'password'])
+
+            LienParentEleve.objects.filter(parent=parent).exclude(
+                eleve_id__in=[eleve.id for eleve in eleves]
+            ).delete()
+            for eleve in eleves:
+                LienParentEleve.objects.get_or_create(parent=parent, eleve=eleve)
+    except IntegrityError:
+        return Response({'error': 'Cet identifiant est déjà utilisé'}, status=409)
+    return Response({'ok': True, 'parent_id': parent.id}, status=201 if parent_id is None else 200)
+
+
+@api_view(['POST'])
+@require_admin
+def parents_toggle_view(request, parent_id):
+    parent = Utilisateur.objects.filter(id=parent_id, role='parent').first()
+    if not parent:
+        return Response({'error': 'Compte parent introuvable'}, status=404)
+    parent.actif = not parent.actif
+    parent.save(update_fields=['actif'])
+    return Response({'ok': True})
+
+
+@api_view(['DELETE', 'POST'])
+@require_admin
+def parents_delete_view(request, parent_id):
+    deleted, _ = Utilisateur.objects.filter(id=parent_id, role='parent').delete()
+    if not deleted:
+        return Response({'error': 'Compte parent introuvable'}, status=404)
     return Response({'ok': True})
 
 

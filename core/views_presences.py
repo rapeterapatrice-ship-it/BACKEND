@@ -7,7 +7,7 @@ from .serializers import (
     ClasseSerializer, PresenceEnregistrerSerializer,
 )
 from .helpers import get_annee_courante, today_iso
-from .auth import require_auth
+from .auth import require_school_staff, require_parent
 
 
 def _libelle_eleve(el):
@@ -15,7 +15,7 @@ def _libelle_eleve(el):
 
 
 @api_view(['GET'])
-@require_auth
+@require_school_staff
 def feuille_view(request):
     """Feuille d'appel d'une classe pour une date + période données.
     GET /api/presences/feuille?classe_id=X&date=YYYY-MM-DD&periode=matin
@@ -61,7 +61,7 @@ def feuille_view(request):
 
 
 @api_view(['POST'])
-@require_auth
+@require_school_staff
 def enregistrer_view(request):
     """Enregistre (ou met à jour) la feuille d'appel.
     POST /api/presences/enregistrer
@@ -117,7 +117,7 @@ def enregistrer_view(request):
 
 
 @api_view(['GET'])
-@require_auth
+@require_school_staff
 def grille_view(request):
     """Grille mensuelle : une ligne par élève, une colonne par jour.
     GET /api/presences/grille?classe_id=X&mois=YYYY-MM&periode=matin
@@ -174,4 +174,53 @@ def grille_view(request):
         'classes': classes, 'niveaux': niveaux, 'classeId': int(classe_id),
         'mois': mois, 'periode': periode, 'jours': jours,
         'eleves': lignes, 'annee': {'id': annee.id, 'libelle': annee.libelle},
+    })
+
+
+@api_view(['GET'])
+@require_parent
+def presences_parent_view(request):
+    annee = get_annee_courante()
+    mois = request.query_params.get('mois') or today_iso()[:7]
+    eleve_ids = request.current_user.liens_eleves.values_list('eleve_id', flat=True)
+    eleves = Eleve.objects.filter(
+        id__in=eleve_ids,
+        annee=annee,
+    ).select_related('classe').order_by('nom', 'prenom') if annee else Eleve.objects.none()
+
+    try:
+        import calendar
+        from datetime import date as _date
+        y, m = int(mois[:4]), int(mois[5:7])
+        jours = [f'{y:04d}-{m:02d}-{j:02d}' for j in range(1, calendar.monthrange(y, m)[1] + 1)]
+    except (TypeError, ValueError):
+        return Response({'error': 'Mois invalide'}, status=400)
+
+    cases = Presence.objects.filter(
+        eleve_id__in=[eleve.id for eleve in eleves],
+        annee=annee,
+        date_presence__gte=jours[0],
+        date_presence__lte=jours[-1],
+    ).order_by('date_presence', 'periode')
+
+    par_eleve = {}
+    for presence in cases:
+        par_eleve.setdefault(presence.eleve_id, []).append({
+            'date': presence.date_presence,
+            'periode': presence.periode,
+            'statut': presence.statut,
+        })
+
+    return Response({
+        'mois': mois,
+        'jours': jours,
+        'annee': {'id': annee.id, 'libelle': annee.libelle} if annee else None,
+        'eleves': [{
+            'id': eleve.id,
+            'numero': eleve.numero,
+            'nom': eleve.nom,
+            'prenom': eleve.prenom,
+            'classe': eleve.classe.nom,
+            'presences': par_eleve.get(eleve.id, []),
+        } for eleve in eleves],
     })

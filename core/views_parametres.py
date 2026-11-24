@@ -1,5 +1,9 @@
+import mimetypes
 import os
+from datetime import time
 from django.conf import settings
+from django.db import transaction
+from django.http import FileResponse, Http404
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser
 from rest_framework.response import Response
@@ -11,6 +15,23 @@ ALLOWED_LOGO_EXT = ['.png', '.jpg', '.jpeg', '.svg', '.gif', '.webp']
 THEMES_VALIDES = ['green', 'blue', 'purple', 'red', 'orange', 'teal', 'dark']
 
 
+def logo_media_view(request, filename):
+    if filename not in {'logo' + ext for ext in ALLOWED_LOGO_EXT}:
+        raise Http404
+    logo_path = os.path.join(settings.MEDIA_ROOT, 'uploads', filename)
+    if not os.path.isfile(logo_path):
+        raise Http404
+
+    response = FileResponse(
+        open(logo_path, 'rb'),
+        content_type=mimetypes.guess_type(filename)[0] or 'application/octet-stream',
+    )
+    response['Cache-Control'] = 'no-store'
+    response['X-Content-Type-Options'] = 'nosniff'
+    response['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+    return response
+
+
 @api_view(['GET'])
 @require_admin
 def parametres_view(request):
@@ -19,6 +40,8 @@ def parametres_view(request):
         'telephone': get_param('telephone_etablissement', ''),
         'theme': get_param('theme_couleur', 'green'),
         'logo': get_param('logo_url', ''),
+        'pause_recreation_debut': get_param('pause_recreation_debut', ''),
+        'pause_recreation_fin': get_param('pause_recreation_fin', ''),
     })
 
 
@@ -54,6 +77,29 @@ def parametres_theme_view(request):
 
 
 @api_view(['POST'])
+@require_admin
+def parametres_pause_recreation_view(request):
+    debut = request.data.get('debut', '')
+    fin = request.data.get('fin', '')
+    if not isinstance(debut, str) or not isinstance(fin, str):
+        return Response({'error': 'Les horaires de récréation sont invalides'}, status=400)
+    if bool(debut) != bool(fin):
+        return Response({'error': 'Indiquez les heures de début et de fin de la récréation'}, status=400)
+    if debut:
+        try:
+            debut_parse = time.fromisoformat(debut)
+            fin_parse = time.fromisoformat(fin)
+        except ValueError:
+            return Response({'error': 'Format d’heure invalide (HH:MM)'}, status=400)
+        if debut_parse >= fin_parse:
+            return Response({'error': 'La fin de la récréation doit être après son début'}, status=400)
+    with transaction.atomic():
+        set_param('pause_recreation_debut', debut)
+        set_param('pause_recreation_fin', fin)
+    return Response({'ok': True})
+
+
+@api_view(['POST'])
 @parser_classes([MultiPartParser])
 @require_admin
 def parametres_logo_view(request):
@@ -77,8 +123,9 @@ def parametres_logo_view(request):
         for chunk in f.chunks():
             dst.write(chunk)
 
-    set_param('logo_url', '/media/uploads/logo' + ext)
-    return Response({'ok': True, 'logo_url': '/media/uploads/logo' + ext})
+    logo_url = '/api/media/uploads/logo' + ext
+    set_param('logo_url', logo_url)
+    return Response({'ok': True, 'logo_url': logo_url})
 
 
 @api_view(['POST'])

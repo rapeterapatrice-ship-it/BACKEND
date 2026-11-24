@@ -9,8 +9,9 @@ from rest_framework.response import Response
 
 from .auth import require_admin, require_auth
 from .facturation import creer_facture_reservee, emettre_facture
-from .helpers import get_param
-from .models import Facture, FichePaieProf, PointageProfesseur, Professeur
+from .helpers import get_annee_courante, get_param, today_fr
+from .models import Facture, FichePaieProf, PointageProfesseur, Professeur, Sortie
+from .pointage import duree_travail_minutes, pause_recreation
 
 CENTIME = Decimal('0.01')
 PRECISION_HEURES = Decimal('0.000001')
@@ -24,7 +25,7 @@ def _parse_month(value):
     return mois if mois.strftime('%Y-%m') == value else None
 
 
-def _calculer_paie(professeur, mois):
+def _calculer_paie(professeur, mois, pause=None):
     dernier_jour = calendar.monthrange(mois.year, mois.month)[1]
     pointages = PointageProfesseur.objects.filter(
         professeur=professeur,
@@ -35,9 +36,9 @@ def _calculer_paie(professeur, mois):
 
     total_minutes = 0
     for pointage in pointages:
-        entree = datetime.combine(pointage.date, pointage.heure_entree)
-        sortie = datetime.combine(pointage.date, pointage.heure_sortie)
-        total_minutes += int((sortie - entree).total_seconds() // 60)
+        total_minutes += duree_travail_minutes(
+            pointage.date, pointage.heure_entree, pointage.heure_sortie, pause,
+        ) or 0
 
     total_heures = (
         Decimal(total_minutes) / Decimal(60)
@@ -73,6 +74,7 @@ def salaires_professeurs_view(request):
     if not mois:
         return Response({'error': 'Mois invalide (format attendu : AAAA-MM)'}, status=400)
 
+    pause = pause_recreation()
     professeurs = Professeur.objects.order_by('nom', 'prenom')
     fiches = {
         fiche.professeur_id: fiche
@@ -81,7 +83,7 @@ def salaires_professeurs_view(request):
     lignes = []
     for professeur in professeurs:
         fiche = fiches.get(professeur.id)
-        total_minutes, heures, montant = _calculer_paie(professeur, mois)
+        total_minutes, heures, montant = _calculer_paie(professeur, mois, pause)
         if fiche and fiche.est_paye:
             heures = fiche.total_heures
             montant = fiche.montant_total
@@ -129,13 +131,17 @@ def payer_salaire_professeur_view(request, professeur_id):
     mois = _parse_month(mois_param)
     if not mois:
         return Response({'error': 'Mois invalide (format attendu : AAAA-MM)'}, status=400)
+    annee = get_annee_courante()
+    if not annee:
+        return Response({'error': 'Aucune année scolaire active pour enregistrer la sortie'}, status=400)
+    pause = pause_recreation()
 
     with transaction.atomic():
         professeur = Professeur.objects.select_for_update().filter(id=professeur_id).first()
         if not professeur:
             return Response({'error': 'Professeur introuvable'}, status=404)
 
-        _, heures, montant = _calculer_paie(professeur, mois)
+        _, heures, montant = _calculer_paie(professeur, mois, pause)
         fiche, _ = FichePaieProf.objects.get_or_create(
             professeur=professeur,
             mois=mois,
@@ -158,5 +164,16 @@ def payer_salaire_professeur_view(request, professeur_id):
         if not Facture.objects.filter(fiche_paie=fiche).exists():
             facture = creer_facture_reservee()
             emettre_facture(facture.id, fiche_paie=fiche)
+        if not Sortie.objects.filter(fiche_paie=fiche).exists():
+            sortie_numero = 'SOR-' + str(Sortie.objects.filter(annee=annee).count() + 1).zfill(4)
+            Sortie.objects.create(
+                annee=annee,
+                numero=sortie_numero,
+                date=today_fr(),
+                motif=f'Salaire professeur — {professeur.prenom} {professeur.nom} — {mois_param}',
+                montant=fiche.montant_total,
+                agent=request.current_user,
+                fiche_paie=fiche,
+            )
 
     return Response({'ok': True, 'facture': _facture_data(fiche)})

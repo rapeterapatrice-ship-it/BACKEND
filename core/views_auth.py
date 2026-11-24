@@ -28,8 +28,12 @@ def login_view(request):
     request.session['user_id'] = user.id
     request.session.save()
 
-    redirect_to = '/' if user.role == 'admin' else (
-        '/evaluations' if user.role == 'professeur' else '/entree'
+    redirect_to = (
+        '/' if user.role == 'admin'
+        else '/evaluations' if user.role == 'professeur'
+        else '/pointage' if user.role == 'surveillant'
+        else '/parent/presences' if user.role == 'parent'
+        else '/entree'
     )
     return Response({'user': SessionUserSerializer(user).data, 'redirect': redirect_to})
 

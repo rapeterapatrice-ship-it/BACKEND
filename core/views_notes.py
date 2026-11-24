@@ -5,9 +5,9 @@ from django.db.models import Q
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from .auth import require_auth, require_academic_auth
+from .auth import require_admin, require_academic_auth
 from .helpers import get_annee_courante
-from .models import Classe, Eleve, Enseignement, Evaluation, Matiere, Note, Professeur
+from .models import Classe, Eleve, Enseignement, Evaluation, Matiere, Note, Parametre, Presence, Professeur
 from .serializers import ClasseSerializer
 
 PERIODES = dict(Evaluation.PERIODE_CHOICES)
@@ -18,6 +18,8 @@ PERIODES = dict(Evaluation.PERIODE_CHOICES)
 def contexte_notes_view(request):
     annee = get_annee_courante()
     utilisateur = request.current_user
+    if utilisateur.role not in ('admin', 'professeur'):
+        return Response({'error': 'Accès réservé aux administrateurs et aux professeurs'}, status=403)
     professeur = None
     if utilisateur.role == 'professeur':
         try:
@@ -76,7 +78,7 @@ def contexte_notes_view(request):
 @api_view(['POST'])
 @require_academic_auth
 def configuration_notes_view(request):
-    if request.current_user.role == 'agent':
+    if request.current_user.role not in ('admin', 'professeur'):
         return Response({'error': 'Seul un administrateur peut configurer les matières et évaluations'}, status=403)
 
     action = request.data.get('action')
@@ -189,7 +191,7 @@ def configuration_notes_view(request):
                 if not titre:
                     return Response({'error': "Le titre de l'évaluation est obligatoire"}, status=400)
                 if periode not in PERIODES:
-                    return Response({'error': 'Période invalide'}, status=400)
+                    return Response({'error': 'Semestre invalide'}, status=400)
                 if (
                     not note_sur.is_finite() or note_sur <= 0
                     or note_sur > Decimal('999.99')
@@ -316,6 +318,84 @@ def enregistrer_note_view(request):
     })
 
 
+@api_view(['POST'])
+@require_academic_auth
+def importer_notes_view(request):
+    if request.current_user.role != 'professeur':
+        return Response({'error': 'La saisie des notes est réservée aux professeurs'}, status=403)
+
+    annee = get_annee_courante()
+    if not annee:
+        return Response({'error': 'Aucune année scolaire active'}, status=400)
+    try:
+        professeur = request.current_user.profil_professeur
+    except Professeur.DoesNotExist:
+        return Response({'error': 'Aucun profil professeur associé à ce compte'}, status=403)
+
+    rows = request.data.get('notes')
+    if not isinstance(rows, list) or not rows:
+        return Response({'error': 'Le fichier ne contient aucune note à importer'}, status=400)
+    if len(rows) > 1000:
+        return Response({'error': 'Un import ne peut pas dépasser 1 000 notes'}, status=400)
+
+    try:
+        evaluation = Evaluation.objects.select_related('enseignement').get(
+            id=request.data.get('evaluation_id'),
+            enseignement__annee=annee,
+            enseignement__professeur=professeur,
+        )
+    except (Evaluation.DoesNotExist, TypeError, ValueError):
+        return Response({'error': 'Évaluation introuvable ou non attribuée à ce professeur'}, status=404)
+
+    validated_rows = []
+    seen_students = set()
+    for index, row in enumerate(rows, start=1):
+        if not isinstance(row, dict):
+            return Response({'error': f'La ligne {index} est invalide'}, status=400)
+        try:
+            student_id_value = row.get('eleve_id')
+            if isinstance(student_id_value, bool) or not isinstance(student_id_value, (int, str)):
+                return Response({'error': f'L’identifiant élève de la ligne {index} est invalide'}, status=400)
+            student_id = int(student_id_value)
+            student = Eleve.objects.get(
+                id=student_id,
+                annee=annee,
+                classe_id=evaluation.enseignement.classe_id,
+            )
+            value = Decimal(str(row.get('valeur')))
+        except Eleve.DoesNotExist:
+            return Response({'error': f'Élève introuvable dans la classe à la ligne {index}'}, status=400)
+        except (TypeError, ValueError, InvalidOperation):
+            return Response({'error': f'La note de la ligne {index} doit être un nombre valide'}, status=400)
+
+        if student.id in seen_students:
+            return Response({'error': f'Cet élève apparaît plusieurs fois (ligne {index})'}, status=400)
+        try:
+            rounded_value = value.quantize(Decimal('0.01'))
+        except InvalidOperation:
+            rounded_value = None
+        if (
+            not value.is_finite() or value < 0 or value > evaluation.note_sur
+            or value > Decimal('999.99')
+            or rounded_value is None or value != rounded_value
+        ):
+            return Response({'error': f'La note de la ligne {index} doit être comprise entre 0 et {evaluation.note_sur}'}, status=400)
+        appreciation = row.get('appreciation', '')
+        if not isinstance(appreciation, str):
+            return Response({'error': f'L’appréciation de la ligne {index} doit être du texte'}, status=400)
+        seen_students.add(student.id)
+        validated_rows.append((student, value, appreciation.strip()))
+
+    with transaction.atomic():
+        for student, value, appreciation in validated_rows:
+            Note.objects.update_or_create(
+                evaluation=evaluation,
+                eleve=student,
+                defaults={'valeur': value, 'appreciation': appreciation},
+            )
+    return Response({'ok': True, 'imported': len(validated_rows), 'evaluation_id': evaluation.id})
+
+
 def _moyenne_ponderee(notes_par_eleve, enseignements):
     total_pondere = Decimal('0')
     total_coefficients = Decimal('0')
@@ -336,7 +416,7 @@ def _moyenne_ponderee(notes_par_eleve, enseignements):
 
 
 @api_view(['GET'])
-@require_auth
+@require_admin
 def bulletin_eleve_view(request):
     annee = get_annee_courante()
     eleve_id = request.query_params.get('eleve_id')
@@ -344,7 +424,7 @@ def bulletin_eleve_view(request):
     if not annee:
         return Response({'error': 'Aucune année scolaire active'}, status=400)
     if periode not in PERIODES:
-        return Response({'error': 'Période invalide'}, status=400)
+        return Response({'error': 'Semestre invalide'}, status=400)
     try:
         eleve = Eleve.objects.select_related('classe', 'annee').get(id=eleve_id, annee=annee)
     except (Eleve.DoesNotExist, TypeError, ValueError):
@@ -352,7 +432,7 @@ def bulletin_eleve_view(request):
 
     enseignements = list(Enseignement.objects.filter(
         classe=eleve.classe, annee=annee,
-    ).select_related('matiere').order_by('matiere__nom'))
+    ).select_related('matiere', 'professeur').order_by('matiere__nom'))
     notes = list(Note.objects.filter(
         evaluation__enseignement__in=enseignements,
         evaluation__periode=periode,
@@ -394,24 +474,47 @@ def bulletin_eleve_view(request):
             moyenne = total_pondere = None
             appreciations = []
             coefficient = Decimal(enseignement.get_coefficient())
+        moyennes_classe = []
+        for student in eleves_classe:
+            student_notes = notes_by_student.get(student['id'], {}).get(enseignement.id, [])
+            if student_notes:
+                moyennes_classe.append(
+                    sum(
+                        (note.valeur * Decimal('20') / note.evaluation.note_sur for note in student_notes),
+                        Decimal('0'),
+                    ) / len(student_notes)
+                )
         matieres.append({
             'matiere': enseignement.matiere.nom,
+            'professeur': str(enseignement.professeur) if enseignement.professeur else '',
+            'competences': enseignement.matiere.description or '',
             'notes': [{
                 'evaluation': note.evaluation.titre,
                 'valeur': str(note.valeur),
                 'note_sur': str(note.evaluation.note_sur),
             } for note in subject_notes],
             'moyenne': round(moyenne, 2) if moyenne is not None else None,
+            'moyenne_classe': round(sum(moyennes_classe, Decimal('0')) / len(moyennes_classe), 2)
+            if moyennes_classe else None,
             'coefficient': int(coefficient),
             'total_pondere': round(total_pondere, 2) if total_pondere is not None else None,
             'appreciation': ' / '.join(appreciations),
         })
 
+    telephone = Parametre.objects.filter(
+        cle='telephone_etablissement'
+    ).values_list('valeur', flat=True).first() or ''
+    presences = Presence.objects.filter(eleve=eleve, annee=annee)
     return Response({
         'annee': annee.libelle,
         'periode': periode,
         'periode_libelle': PERIODES[periode],
         'etablissement': _nom_etablissement(),
+        'telephone_etablissement': telephone,
+        'assiduite': {
+            'absences': presences.filter(statut='absent').count(),
+            'retards': presences.filter(statut='retard').count(),
+        },
         'eleve': {
             'id': eleve.id, 'numero': eleve.numero, 'nom': eleve.nom,
             'prenom': eleve.prenom, 'classe': eleve.classe.nom, 'niveau': eleve.classe.niveau,

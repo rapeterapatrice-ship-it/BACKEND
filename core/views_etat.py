@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
@@ -39,16 +41,21 @@ def etat_view(request):
         sorties_qs = sorties_qs.filter(date__lte=date_fin)
     sorties = SortieSerializer(sorties_qs.order_by('-created_at'), many=True).data
 
-    total_entrees = sum(e['montant'] for e in entrees)
-    total_sorties = sum(s['montant'] for s in sorties)
+    total_entrees = sum((Decimal(str(e['montant'])) for e in entrees), Decimal('0'))
+    total_sorties = sum((Decimal(str(s['montant'])) for s in sorties), Decimal('0'))
 
     by_type_map = {}
     for e in entrees:
-        by_type_map[e['type']] = by_type_map.get(e['type'], 0) + e['montant']
-    by_type = [{'type': t, 'total': v} for t, v in by_type_map.items()]
+        by_type_map[e['type']] = by_type_map.get(e['type'], Decimal('0')) + Decimal(str(e['montant']))
+    by_type = [{'type': t, 'total': _json_amount(v)} for t, v in by_type_map.items()]
 
     return Response({
         'anneeFiltre': AnneeScolaireSerializer(annee_filtre).data,
-        'annees': annees, 'totalEntrees': total_entrees, 'totalSorties': total_sorties,
-        'solde': total_entrees - total_sorties, 'byType': by_type, 'sorties': sorties, 'entrees': entrees,
+        'annees': annees, 'totalEntrees': _json_amount(total_entrees), 'totalSorties': _json_amount(total_sorties),
+        'solde': _json_amount(total_entrees - total_sorties),
+        'byType': by_type, 'sorties': sorties, 'entrees': entrees,
     })
+
+
+def _json_amount(amount):
+    return int(amount) if amount == amount.to_integral_value() else float(amount)

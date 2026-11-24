@@ -1,24 +1,57 @@
 import json
+import os
+import tempfile
 from datetime import datetime, time, timedelta
+from importlib import import_module
 from zoneinfo import ZoneInfo
 
-from django.test import TestCase
+from django.apps import apps
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from .audit import reset_audit_actor, set_audit_actor
 from .models import (
 	AnneeScolaire, Classe, Eleve, Enseignement, Evaluation, Entree, Matiere, MoisEcolage, Salle,
 	Facture, FichePaieProf, JournalOperation, Note, Parametre, PointageProfesseur, Presence,
-	LocationBook, Professeur, TypePaiement,
+	LocationBook, LienParentEleve, Professeur, Sortie, TypePaiement,
 	Utilisateur,
 )
 from .payment_logic import calculate_eleve_status, get_mois_facturables
+
+
+class EtatAccountTests(TestCase):
+	def setUp(self):
+		self.admin = Utilisateur.objects.create(
+			prenom='Admin', nom='Compte', username='admin-etat', password='unused', role='admin',
+		)
+		self.annee = AnneeScolaire.objects.create(libelle='2026-2027', courante=True)
+		session = self.client.session
+		session['user_id'] = self.admin.id
+		session.save()
+
+	def test_account_summary_sums_integer_income_and_decimal_expenses(self):
+		Entree.objects.create(annee=self.annee, date='2026-10-10', type='Écolage', montant=25)
+		Sortie.objects.create(
+			annee=self.annee, numero='S-001', date='2026-10-11',
+			motif='Fournitures', montant='12.50',
+		)
+
+		response = self.client.get('/api/etat')
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.json()['totalEntrees'], 25)
+		self.assertEqual(response.json()['totalSorties'], 12.5)
+		self.assertEqual(response.json()['solde'], 12.5)
 
 
 class PresenceViewsTests(TestCase):
 	def setUp(self):
 		self.admin = Utilisateur.objects.create(
 			prenom='Admin', nom='Test', username='admin-test', password='unused', role='admin'
+		)
+		self.agent = Utilisateur.objects.create(
+			prenom='Agent', nom='Financier', username='agent-presences', password='unused', role='agent',
 		)
 		self.annee = AnneeScolaire.objects.create(libelle='2026-2027', courante=True)
 		self.autre_annee = AnneeScolaire.objects.create(libelle='2025-2026')
@@ -57,6 +90,84 @@ class PresenceViewsTests(TestCase):
 
 		self.assertEqual(response.status_code, 400)
 		self.assertEqual(Presence.objects.count(), 0)
+
+	def test_financial_agent_cannot_access_school_attendance(self):
+		session = self.client.session
+		session['user_id'] = self.agent.id
+		session.save()
+
+		response = self.client.get('/api/presences/feuille')
+
+		self.assertEqual(response.status_code, 403)
+
+	def test_parent_can_view_only_linked_students_attendance(self):
+		parent = Utilisateur.objects.create(
+			prenom='Parent', nom='Test', username='parent-presences',
+			password='unused', role='parent',
+		)
+		LienParentEleve.objects.create(parent=parent, eleve=self.eleve)
+		Presence.objects.create(
+			eleve=self.eleve, annee=self.annee, classe=self.classe,
+			date_presence='2026-11-24', periode='matin', statut='absent',
+		)
+		Presence.objects.create(
+			eleve=self.eleve_autre_classe, annee=self.annee, classe=self.autre_classe,
+			date_presence='2026-11-24', periode='matin', statut='present',
+		)
+		session = self.client.session
+		session['user_id'] = parent.id
+		session.save()
+
+		response = self.client.get('/api/parent/presences', {'mois': '2026-11'})
+
+		self.assertEqual(response.status_code, 200)
+		result = response.json()
+		self.assertEqual([eleve['id'] for eleve in result['eleves']], [self.eleve.id])
+		self.assertEqual(result['eleves'][0]['presences'][0]['statut'], 'absent')
+
+
+class LogoSettingsTests(TestCase):
+	def setUp(self):
+		admin = Utilisateur.objects.create(
+			prenom='Admin', nom='Logo', username='admin-logo', password='unused', role='admin'
+		)
+		session = self.client.session
+		session['user_id'] = admin.id
+		session.save()
+
+	def test_uploaded_logo_is_publicly_served_when_debug_is_disabled(self):
+		with tempfile.TemporaryDirectory() as media_root:
+			with override_settings(MEDIA_ROOT=media_root, DEBUG=False):
+				upload = SimpleUploadedFile('logo.png', b'logo-content', content_type='image/png')
+				response = self.client.post('/api/admin/parametres/logo', {'logo': upload})
+
+				self.assertEqual(response.status_code, 200)
+				self.assertEqual(response.json()['logo_url'], '/api/media/uploads/logo.png')
+
+				logo_response = self.client.get(response.json()['logo_url'])
+
+				self.assertEqual(logo_response.status_code, 200)
+				self.assertEqual(b''.join(logo_response.streaming_content), b'logo-content')
+				self.assertEqual(logo_response['Content-Type'], 'image/png')
+				self.assertEqual(logo_response['Cache-Control'], 'no-store')
+
+	def test_existing_media_logo_url_remains_available(self):
+		with tempfile.TemporaryDirectory() as media_root:
+			with override_settings(MEDIA_ROOT=media_root):
+				upload_dir = os.path.join(media_root, 'uploads')
+				os.makedirs(upload_dir)
+				with open(os.path.join(upload_dir, 'logo.jpg'), 'wb') as logo:
+					logo.write(b'legacy-logo')
+
+				response = self.client.get('/media/uploads/logo.jpg')
+
+				self.assertEqual(response.status_code, 200)
+				self.assertEqual(b''.join(response.streaming_content), b'legacy-logo')
+
+	def test_logo_media_endpoint_rejects_other_files(self):
+		response = self.client.get('/api/media/uploads/other.png')
+
+		self.assertEqual(response.status_code, 404)
 
 
 class SallesAdminTests(TestCase):
@@ -117,6 +228,10 @@ class PointageProfesseurTests(TestCase):
 			prenom='Agent', nom='Test', username='agent-pointage',
 			password='unused', role='agent',
 		)
+		self.surveillant = Utilisateur.objects.create(
+			prenom='Surveillant', nom='Test', username='surveillant-pointage',
+			password='unused', role='surveillant',
+		)
 
 	def login_as(self, utilisateur):
 		session = self.client.session
@@ -158,8 +273,8 @@ class PointageProfesseurTests(TestCase):
 
 		self.assertEqual(response.status_code, 400)
 
-	def test_agent_can_load_teacher_sheet_and_register_attendance(self):
-		self.login_as(self.agent)
+	def test_surveillant_can_load_teacher_sheet_and_register_attendance(self):
+		self.login_as(self.surveillant)
 		date = timezone.localdate(timezone=ZoneInfo('Indian/Antananarivo')).isoformat()
 		feuille = self.client.get('/api/pointages/feuille', {'date': date})
 		self.assertEqual(feuille.status_code, 200)
@@ -186,7 +301,7 @@ class PointageProfesseurTests(TestCase):
 		self.assertEqual(PointageProfesseur.objects.count(), 1)
 
 	def test_absence_clears_entry_and_exit_times(self):
-		self.login_as(self.agent)
+		self.login_as(self.surveillant)
 		date = timezone.localdate(timezone=ZoneInfo('Indian/Antananarivo')).isoformat()
 		response = self.client.post(
 			'/api/pointages/enregistrer',
@@ -208,7 +323,7 @@ class PointageProfesseurTests(TestCase):
 		self.assertIsNone(pointage.heure_sortie)
 
 	def test_entry_time_is_required_for_present_teacher(self):
-		self.login_as(self.agent)
+		self.login_as(self.surveillant)
 		date = timezone.localdate(timezone=ZoneInfo('Indian/Antananarivo')).isoformat()
 		response = self.client.post(
 			'/api/pointages/enregistrer',
@@ -223,7 +338,7 @@ class PointageProfesseurTests(TestCase):
 
 
 	def test_exit_cannot_precede_entry(self):
-		self.login_as(self.agent)
+		self.login_as(self.surveillant)
 		date = timezone.localdate(timezone=ZoneInfo('Indian/Antananarivo')).isoformat()
 		response = self.client.post(
 			'/api/pointages/enregistrer',
@@ -241,8 +356,8 @@ class PointageProfesseurTests(TestCase):
 		self.assertEqual(response.status_code, 400)
 		self.assertEqual(PointageProfesseur.objects.count(), 0)
 
-	def test_agent_cannot_edit_past_date(self):
-		self.login_as(self.agent)
+	def test_surveillant_cannot_edit_past_date(self):
+		self.login_as(self.surveillant)
 		date = (timezone.localdate(timezone=ZoneInfo('Indian/Antananarivo')) - timedelta(days=1)).isoformat()
 		response = self.client.post(
 			'/api/pointages/enregistrer',
@@ -251,9 +366,10 @@ class PointageProfesseurTests(TestCase):
 		)
 		self.assertEqual(response.status_code, 403)
 
-	def test_admin_cannot_register_pointage(self):
+	def test_admin_can_only_view_the_monthly_pointage_sheet(self):
 		self.login_as(self.admin)
 		date = timezone.localdate(timezone=ZoneInfo('Indian/Antananarivo')).isoformat()
+		feuille_mois = self.client.get('/api/pointages/feuille', {'mois': date[:7]})
 		feuille_jour = self.client.get('/api/pointages/feuille', {'date': date})
 		response = self.client.post(
 			'/api/pointages/enregistrer',
@@ -263,14 +379,59 @@ class PointageProfesseurTests(TestCase):
 			}),
 			content_type='application/json',
 		)
+		self.assertEqual(feuille_mois.status_code, 200)
 		self.assertEqual(feuille_jour.status_code, 403)
 		self.assertEqual(response.status_code, 403)
 		self.assertEqual(PointageProfesseur.objects.count(), 0)
+
+	def test_financial_agent_cannot_access_teacher_pointage(self):
+		self.login_as(self.agent)
+		date = timezone.localdate(timezone=ZoneInfo('Indian/Antananarivo')).isoformat()
+
+		response = self.client.get('/api/pointages/feuille', {'date': date})
+
+		self.assertEqual(response.status_code, 403)
+
+	def test_surveillant_cannot_access_financial_and_grade_pages(self):
+		self.login_as(self.surveillant)
+
+		salaires = self.client.get('/api/admin/salaires-professeurs')
+		sorties = self.client.get('/api/sortie')
+		notes = self.client.get('/api/academique/contexte')
+
+		self.assertEqual(salaires.status_code, 403)
+		self.assertEqual(sorties.status_code, 403)
+		self.assertEqual(notes.status_code, 403)
 
 	def test_teacher_account_cannot_manage_the_sheet(self):
 		self.login_as(self.teacher_user)
 		response = self.client.get('/api/pointages/feuille')
 		self.assertEqual(response.status_code, 403)
+
+	def test_teacher_can_view_only_own_monthly_sheet(self):
+		self.login_as(self.teacher_user)
+		PointageProfesseur.objects.create(
+			professeur=self.professeur, date='2026-10-05', statut='present',
+			heure_entree=time(8, 0), heure_sortie=time(12, 0),
+		)
+		other_user = Utilisateur.objects.create(
+			prenom='Autre', nom='Professeur', username='other-pointage',
+			password='unused', role='professeur',
+		)
+		other_professeur = Professeur.objects.create(
+			utilisateur=other_user, prenom='Autre', nom='Professeur',
+		)
+		PointageProfesseur.objects.create(
+			professeur=other_professeur, date='2026-10-06', statut='absent',
+		)
+
+		response = self.client.get('/api/pointages/feuille', {'mois': '2026-10'})
+
+		self.assertEqual(response.status_code, 200)
+		result = response.json()
+		self.assertEqual(result['total'], 1)
+		self.assertEqual(len(result['professeurs']), 1)
+		self.assertEqual(result['professeurs'][0]['professeur_id'], self.professeur.id)
 
 
 class AnneesScolairesTests(TestCase):
@@ -339,11 +500,11 @@ class InscriptionEleveTests(TestCase):
 			nom='CP', niveau='Primaire', tarif_inscription=5000,
 		)
 		self.ancien_eleve = Eleve.objects.create(
-			numero='2024-0007', prenom='Mialy', nom='Rabe', classe=self.classe,
+			numero='250007', prenom='Mialy', nom='Rabe', classe=self.classe,
 			annee=self.annee_precedente,
 		)
 		self.numero_existant = Eleve.objects.create(
-			numero='2026-0003', prenom='Andry', nom='Test', classe=self.classe,
+			numero='260003', prenom='Andry', nom='Test', classe=self.classe,
 			annee=self.annee,
 		)
 		self.login_as(self.admin)
@@ -371,13 +532,14 @@ class InscriptionEleveTests(TestCase):
 
 		self.assertEqual(response.status_code, 200)
 		preview = self.client.get('/api/entree?preview=1').json()['preview']
-		self.assertEqual(preview['saveData']['numero'], '2026-0004')
+		self.assertEqual(preview['saveData']['numero'], '260004')
+		self.assertEqual(preview['facture']['im_eleve'], '260004')
 		self.assertTrue(preview['facture']['numero'].startswith('FAC-2026-'))
-		self.assertNotEqual(preview['facture']['numero'], '2026-0004')
+		self.assertNotEqual(preview['facture']['numero'], '260004')
 		self.assertEqual(preview['facture']['telephone'], '+261 20 00 000 00')
 		saved = self.client.post('/api/entree/valider')
 		self.assertEqual(saved.status_code, 200)
-		self.assertTrue(Eleve.objects.filter(numero='2026-0004', annee=self.annee).exists())
+		self.assertTrue(Eleve.objects.filter(numero='260004', annee=self.annee).exists())
 		facture = Facture.objects.get(entree__type='inscription')
 		self.assertEqual(facture.numero, preview['facture']['numero'])
 		self.assertEqual(facture.statut, 'emise')
@@ -386,13 +548,14 @@ class InscriptionEleveTests(TestCase):
 			self.client.get('/api/entree').json()['entrees'][0]['numero_facture'],
 			facture.numero,
 		)
+		self.assertEqual(self.client.get('/api/entree').json()['entrees'][0]['im_eleve'], '260004')
 
 	def test_reenrollment_search_selects_existing_im_and_reuses_identity(self):
-		search = self.client.get('/api/entree/reinscription/rechercher', {'im': '2024-00'})
+		search = self.client.get('/api/entree/reinscription/rechercher', {'im': '2500'})
 		self.assertEqual(search.status_code, 200)
 		self.assertEqual(search.json()['eleves'], [{
 			'id': self.ancien_eleve.id,
-			'numero': '2024-0007',
+			'numero': '250007',
 			'nom': 'Rabe',
 			'prenom': 'Mialy',
 			'classe': 'CP',
@@ -411,14 +574,14 @@ class InscriptionEleveTests(TestCase):
 		)
 		self.assertEqual(preview_response.status_code, 200)
 		preview = self.client.get('/api/entree?preview=1').json()['preview']
-		self.assertEqual(preview['saveData']['numero'], '2024-0007')
+		self.assertEqual(preview['saveData']['numero'], '250007')
 		self.assertEqual(preview['facture']['nom'], 'Rabe')
 		self.assertEqual(preview['facture']['prenom'], 'Mialy')
 
 		saved = self.client.post('/api/entree/valider')
 		self.assertEqual(saved.status_code, 200)
 		self.assertEqual(
-			Eleve.objects.filter(numero='2024-0007', annee=self.annee).count(), 1,
+			Eleve.objects.filter(numero='250007', annee=self.annee).count(), 1,
 		)
 
 	def test_reenrollment_rejects_student_without_previous_year_im(self):
@@ -471,6 +634,22 @@ class InscriptionEleveTests(TestCase):
 		).exists())
 
 
+class StudentIMMigrationTests(TestCase):
+	def test_legacy_im_is_shortened_without_changing_enrollment_year(self):
+		annee = AnneeScolaire.objects.create(libelle='2025-2026')
+		classe = Classe.objects.create(nom='CP', niveau='Primaire')
+		eleve = Eleve.objects.create(
+			numero='2025-0007', prenom='Mialy', nom='Rabe', classe=classe, annee=annee,
+		)
+		migration = import_module('core.migrations.0017_normalize_student_im')
+
+		migration.normalize_student_ims(apps, None)
+
+		eleve.refresh_from_db()
+		self.assertEqual(eleve.numero, '250007')
+		self.assertEqual(eleve.annee_id, annee.id)
+
+
 class SalairesProfesseursTests(TestCase):
 	def setUp(self):
 		self.admin = Utilisateur.objects.create(
@@ -484,6 +663,7 @@ class SalairesProfesseursTests(TestCase):
 		self.professeur = Professeur.objects.create(
 			prenom='Mialy', nom='Prof', taux_horaire=1000,
 		)
+		self.annee = AnneeScolaire.objects.create(libelle='2026-2027', courante=True)
 		self.login_as(self.admin)
 
 	def login_as(self, utilisateur):
@@ -547,6 +727,20 @@ class SalairesProfesseursTests(TestCase):
 		self.assertEqual(facture['taux_horaire'], '1000.00')
 		self.assertEqual(facture['montant_total'], '2000.00')
 		self.assertTrue(FichePaieProf.objects.get(professeur=self.professeur).est_paye)
+		sortie = Sortie.objects.get(fiche_paie__professeur=self.professeur)
+		self.assertEqual(sortie.annee, self.annee)
+		self.assertEqual(sortie.montant, 2000)
+		self.assertIn('Salaire professeur', sortie.motif)
+
+		second_payment = self.client.post(
+			f'/api/admin/salaires-professeurs/{self.professeur.id}/payer',
+			data=json.dumps({'mois': '2026-10'}),
+			content_type='application/json',
+		)
+		self.assertEqual(second_payment.status_code, 200)
+		self.assertEqual(Sortie.objects.filter(fiche_paie__professeur=self.professeur).count(), 1)
+		suppression_sortie = self.client.delete(f'/api/sortie/{sortie.id}')
+		self.assertEqual(suppression_sortie.status_code, 400)
 
 		self.professeur.taux_horaire = 2000
 		self.professeur.save(update_fields=['taux_horaire'])
@@ -569,6 +763,24 @@ class SalairesProfesseursTests(TestCase):
 		self.assertEqual(salaire['total_minutes'], 1)
 		self.assertEqual(salaire['total_heures'], '0.016667')
 		self.assertEqual(salaire['montant_total'], '16.67')
+
+	def test_recreation_pause_is_deducted_only_for_its_overlap(self):
+		self.client.post(
+			'/api/admin/parametres/pause-recreation',
+			data=json.dumps({'debut': '10:00', 'fin': '10:30'}),
+			content_type='application/json',
+		)
+		PointageProfesseur.objects.create(
+			professeur=self.professeur, date='2026-10-01', statut='present',
+			heure_entree=time(8, 0), heure_sortie=time(12, 0),
+		)
+
+		response = self.client.get('/api/admin/salaires-professeurs', {'mois': '2026-10'})
+
+		self.assertEqual(response.status_code, 200)
+		salaire = response.json()['professeurs'][0]
+		self.assertEqual(salaire['total_minutes'], 210)
+		self.assertEqual(salaire['montant_total'], '3500.00')
 
 	def test_agent_can_view_salary_and_mark_it_paid_but_cannot_change_rate(self):
 		PointageProfesseur.objects.create(
@@ -630,6 +842,41 @@ class FacturationTests(TestCase):
 		self.assertEqual(response.status_code, 400)
 		self.assertFalse(Parametre.objects.filter(cle='telephone_etablissement').exists())
 
+	def test_admin_can_configure_recreation_interval(self):
+		response = self.client.post(
+			'/api/admin/parametres/pause-recreation',
+			data=json.dumps({'debut': '10:00', 'fin': '10:30'}),
+			content_type='application/json',
+		)
+		settings = self.client.get('/api/admin/parametres')
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(settings.json()['pause_recreation_debut'], '10:00')
+		self.assertEqual(settings.json()['pause_recreation_fin'], '10:30')
+
+	def test_recreation_interval_must_be_a_valid_pair(self):
+		response = self.client.post(
+			'/api/admin/parametres/pause-recreation',
+			data=json.dumps({'debut': '10:00', 'fin': ''}),
+			content_type='application/json',
+		)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertFalse(Parametre.objects.filter(cle='pause_recreation_debut').exists())
+
+	def test_admin_can_create_a_surveillant_account(self):
+		response = self.client.post(
+			'/api/admin/agents/add',
+			data=json.dumps({
+				'prenom': 'Miora', 'nom': 'Rakoto', 'username': 'surveillant-test',
+				'password': 'secret123', 'role': 'surveillant',
+			}),
+			content_type='application/json',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertTrue(Utilisateur.objects.filter(username='surveillant-test', role='surveillant').exists())
+
 	def test_book_rental_invoice_number_is_persisted_and_returned_in_history(self):
 		annee = AnneeScolaire.objects.create(libelle='2026-2027', courante=True)
 		classe = Classe.objects.create(nom='CP', niveau='Primaire')
@@ -652,11 +899,13 @@ class FacturationTests(TestCase):
 		history = self.client.get('/api/location-livres').json()
 
 		self.assertEqual(preview['facture']['telephone'], '020 00 000 00')
+		self.assertEqual(preview['facture']['im_eleve'], eleve.numero)
 		self.assertTrue(preview['facture']['numero'].startswith('FAC-2026-'))
 		self.assertEqual(saved.status_code, 200)
 		self.assertEqual(facture.numero, preview['facture']['numero'])
 		self.assertEqual(facture.statut, 'emise')
 		self.assertEqual(history['locations'][0]['numero_facture'], facture.numero)
+		self.assertEqual(history['locations'][0]['numero'], eleve.numero)
 
 
 class StudentPaymentInvoiceTests(TestCase):
@@ -689,9 +938,11 @@ class StudentPaymentInvoiceTests(TestCase):
 		entree = Entree.objects.get(type='ecolage')
 		facture = Facture.objects.get(entree=entree)
 
+		self.assertEqual(preview['facture']['im_eleve'], self.eleve.numero)
 		self.assertEqual(saved.status_code, 200)
 		self.assertEqual(facture.numero, preview['facture']['numero'])
 		self.assertEqual(facture.statut, 'emise')
+		self.assertEqual(self.client.get('/api/entree').json()['entrees'][0]['im_eleve'], self.eleve.numero)
 
 	def test_annual_payment_receipt_is_stored_with_invoice_number(self):
 		preview_response = self.client.post(
@@ -706,6 +957,7 @@ class StudentPaymentInvoiceTests(TestCase):
 		entree = Entree.objects.get(type='fascicule')
 		facture = Facture.objects.get(entree=entree)
 
+		self.assertEqual(preview['facture']['im_eleve'], self.eleve.numero)
 		self.assertEqual(saved.status_code, 200)
 		self.assertEqual(facture.numero, preview['facture']['numero'])
 		self.assertEqual(facture.statut, 'emise')
@@ -725,6 +977,7 @@ class StudentPaymentInvoiceTests(TestCase):
 		entree = Entree.objects.get(type='Cantine')
 		facture = Facture.objects.get(entree=entree)
 
+		self.assertEqual(preview['facture']['im_eleve'], self.eleve.numero)
 		self.assertEqual(saved.status_code, 200)
 		self.assertEqual(facture.numero, preview['facture']['numero'])
 		self.assertEqual(facture.statut, 'emise')
@@ -738,6 +991,10 @@ class JournalOperationTests(TestCase):
 		self.agent = Utilisateur.objects.create(
 			prenom='Agent', nom='Journal', username='journal-agent', password='unused', role='agent',
 		)
+		self.surveillant = Utilisateur.objects.create(
+			prenom='Surveillant', nom='Journal', username='journal-surveillant',
+			password='unused', role='surveillant',
+		)
 		self.professeur = Professeur.objects.create(prenom='Mialy', nom='Prof')
 
 	def login_as(self, utilisateur):
@@ -746,7 +1003,7 @@ class JournalOperationTests(TestCase):
 		session.save()
 
 	def test_successful_write_is_logged_with_user_and_action(self):
-		self.login_as(self.agent)
+		self.login_as(self.surveillant)
 		date = timezone.localdate(timezone=ZoneInfo('Indian/Antananarivo')).isoformat()
 
 		response = self.client.post(
@@ -763,14 +1020,14 @@ class JournalOperationTests(TestCase):
 		)
 
 		self.assertEqual(response.status_code, 200)
-		log = JournalOperation.objects.get(utilisateur=self.agent)
-		self.assertEqual(log.utilisateur, self.agent)
-		self.assertEqual(log.nom_utilisateur, 'Agent Journal')
+		log = JournalOperation.objects.get(utilisateur=self.surveillant)
+		self.assertEqual(log.utilisateur, self.surveillant)
+		self.assertEqual(log.nom_utilisateur, 'Surveillant Journal')
 		self.assertEqual(log.action, 'creation')
 		self.assertIn('Mialy Prof', log.objet)
 
 	def test_failed_write_does_not_create_a_business_log(self):
-		self.login_as(self.agent)
+		self.login_as(self.surveillant)
 		response = self.client.post(
 			'/api/pointages/enregistrer',
 			data=json.dumps({'date': 'invalid', 'lignes': []}),
@@ -781,13 +1038,13 @@ class JournalOperationTests(TestCase):
 		self.assertEqual(JournalOperation.objects.count(), 0)
 
 	def test_reads_are_not_logged(self):
-		self.login_as(self.agent)
-		agent_response = self.client.get('/api/pointages/feuille')
-		self.assertEqual(agent_response.status_code, 200)
+		self.login_as(self.surveillant)
+		surveillant_response = self.client.get('/api/pointages/feuille')
+		self.assertEqual(surveillant_response.status_code, 200)
 		self.assertEqual(JournalOperation.objects.count(), 0)
 
 	def test_update_and_delete_are_logged_against_the_affected_teacher(self):
-		self.login_as(self.agent)
+		self.login_as(self.surveillant)
 		date = timezone.localdate(timezone=ZoneInfo('Indian/Antananarivo')).isoformat()
 		payload = {
 			'date': date,
@@ -800,7 +1057,7 @@ class JournalOperationTests(TestCase):
 		self.client.post('/api/pointages/enregistrer', data=json.dumps(payload), content_type='application/json')
 		payload['lignes'][0]['heure_entree'] = '08:10'
 		self.client.post('/api/pointages/enregistrer', data=json.dumps(payload), content_type='application/json')
-		token = set_audit_actor(self.agent)
+		token = set_audit_actor(self.surveillant)
 		try:
 			self.professeur.pointages.first().delete()
 		finally:
@@ -960,6 +1217,77 @@ class RetardPaymentLogicTests(TestCase):
 		self.assertEqual(response.json()['eleves'], [])
 
 
+class SortiePermissionTests(TestCase):
+	def setUp(self):
+		self.admin = Utilisateur.objects.create(
+			prenom='Admin', nom='Sortie', username='sortie-admin', password='unused', role='admin',
+		)
+		self.agent = Utilisateur.objects.create(
+			prenom='Agent', nom='Sortie', username='sortie-agent', password='unused', role='agent',
+		)
+		self.annee = AnneeScolaire.objects.create(libelle='2026-2027', courante=True)
+		self.sortie = Sortie.objects.create(
+			annee=self.annee, numero='SOR-0001', date='23/11/2026',
+			motif='Fournitures', montant=1000, agent=self.agent,
+		)
+
+	def login_as(self, user):
+		session = self.client.session
+		session['user_id'] = user.id
+		session.save()
+
+	def test_agent_cannot_edit_or_delete_sortie(self):
+		self.login_as(self.agent)
+
+		edit_response = self.client.post(
+			f'/api/sortie/{self.sortie.id}/edit',
+			data=json.dumps({'motif': 'Transport', 'montant': 1500}),
+			content_type='application/json',
+		)
+		delete_response = self.client.delete(f'/api/sortie/{self.sortie.id}')
+
+		self.assertEqual(edit_response.status_code, 403)
+		self.assertEqual(delete_response.status_code, 403)
+		self.sortie.refresh_from_db()
+		self.assertEqual(self.sortie.motif, 'Fournitures')
+		self.assertEqual(self.sortie.montant, 1000)
+
+	def test_admin_can_edit_sortie(self):
+		self.login_as(self.admin)
+
+		response = self.client.post(
+			f'/api/sortie/{self.sortie.id}/edit',
+			data=json.dumps({'motif': 'Transport', 'montant': 1500}),
+			content_type='application/json',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.sortie.refresh_from_db()
+		self.assertEqual(self.sortie.motif, 'Transport')
+		self.assertEqual(self.sortie.montant, 1500)
+
+	def test_admin_can_delete_sortie(self):
+		self.login_as(self.admin)
+
+		response = self.client.delete(f'/api/sortie/{self.sortie.id}')
+
+		self.assertEqual(response.status_code, 200)
+		self.assertFalse(Sortie.objects.filter(id=self.sortie.id).exists())
+
+	def test_new_sortie_uses_student_im_format(self):
+		self.login_as(self.admin)
+
+		response = self.client.post(
+			'/api/sortie/add',
+			data=json.dumps({'motif': 'Transport', 'montant': 2500}),
+			content_type='application/json',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		sortie = Sortie.objects.exclude(id=self.sortie.id).get()
+		self.assertRegex(sortie.numero, r'^26\d{4}$')
+
+
 class BulletinNotesApiTests(TestCase):
 	def setUp(self):
 		self.admin = Utilisateur.objects.create(
@@ -1042,6 +1370,61 @@ class BulletinNotesApiTests(TestCase):
 		self.assertEqual(wrong_class.status_code, 404)
 		self.assertEqual(Note.objects.count(), 0)
 
+	def test_professor_can_import_notes_and_update_existing_grades(self):
+		self.login_as_professeur()
+		Note.objects.create(
+			evaluation=self.francais_eval, eleve=self.eleve, valeur=6, appreciation='Ancienne',
+		)
+
+		response = self.client.post(
+			'/api/academique/notes/importer',
+			data=json.dumps({
+				'evaluation_id': self.francais_eval.id,
+				'notes': [
+					{'eleve_id': self.eleve.id, 'valeur': '8.5', 'appreciation': 'Bien'},
+					{'eleve_id': self.autre_eleve.id, 'valeur': '9', 'appreciation': ''},
+				],
+			}),
+			content_type='application/json',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.json()['imported'], 2)
+		self.assertEqual(Note.objects.count(), 2)
+		self.assertEqual(str(Note.objects.get(eleve=self.eleve, evaluation=self.francais_eval).valeur), '8.50')
+		self.assertEqual(Note.objects.get(eleve=self.eleve, evaluation=self.francais_eval).appreciation, 'Bien')
+
+	def test_note_import_rejects_invalid_batch_without_partial_saves(self):
+		self.login_as_professeur()
+
+		response = self.client.post(
+			'/api/academique/notes/importer',
+			data=json.dumps({
+				'evaluation_id': self.francais_eval.id,
+				'notes': [
+					{'eleve_id': self.eleve.id, 'valeur': '8'},
+					{'eleve_id': self.hors_classe.id, 'valeur': '9'},
+				],
+			}),
+			content_type='application/json',
+		)
+
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(Note.objects.count(), 0)
+
+	def test_admin_cannot_import_professor_grades(self):
+		response = self.client.post(
+			'/api/academique/notes/importer',
+			data=json.dumps({
+				'evaluation_id': self.francais_eval.id,
+				'notes': [{'eleve_id': self.eleve.id, 'valeur': '8'}],
+			}),
+			content_type='application/json',
+		)
+
+		self.assertEqual(response.status_code, 403)
+		self.assertEqual(Note.objects.count(), 0)
+
 	def test_student_search_matches_name_and_number_within_selected_class(self):
 		self.login_as_professeur()
 		response = self.client.get('/api/academique/eleves', {
@@ -1097,12 +1480,24 @@ class BulletinNotesApiTests(TestCase):
 		self.assertEqual(Note.objects.count(), 0)
 
 	def test_bulletin_normalizes_notes_weights_subjects_and_ranks_students(self):
+		self.francais.description = 'Comprendre et produire des textes.'
+		self.francais.save(update_fields=['description'])
+		self.francais_enseignement.professeur = self.professeur
+		self.francais_enseignement.save(update_fields=['professeur'])
 		Note.objects.create(
 			evaluation=self.francais_eval, eleve=self.eleve, valeur=8, appreciation='Très bien'
 		)
 		Note.objects.create(evaluation=self.maths_eval, eleve=self.eleve, valeur=10)
 		Note.objects.create(evaluation=self.francais_eval, eleve=self.autre_eleve, valeur=6)
 		Note.objects.create(evaluation=self.maths_eval, eleve=self.autre_eleve, valeur=20)
+		Presence.objects.create(
+			eleve=self.eleve, annee=self.annee, classe=self.classe,
+			periode='matin', statut='absent', date_presence='2026-10-01',
+		)
+		Presence.objects.create(
+			eleve=self.eleve, annee=self.annee, classe=self.classe,
+			periode='matin', statut='retard', date_presence='2026-10-02',
+		)
 
 		response = self.client.get('/api/academique/bulletin', {
 			'eleve_id': self.eleve.id, 'periode': 'trimestre_1',
@@ -1117,6 +1512,10 @@ class BulletinNotesApiTests(TestCase):
 		self.assertEqual(bulletin['matieres'][0]['coefficient'], 2)
 		self.assertEqual(bulletin['matieres'][0]['total_pondere'], 32)
 		self.assertEqual(bulletin['matieres'][0]['appreciation'], 'Très bien')
+		self.assertEqual(bulletin['matieres'][0]['professeur'], 'Professeur Notes')
+		self.assertEqual(bulletin['matieres'][0]['competences'], 'Comprendre et produire des textes.')
+		self.assertEqual(bulletin['matieres'][0]['moyenne_classe'], 14)
+		self.assertEqual(bulletin['assiduite'], {'absences': 1, 'retards': 1})
 
 	def test_bulletin_only_includes_notes_from_selected_period(self):
 		second_period_evaluation = Evaluation.objects.create(
@@ -1186,7 +1585,7 @@ class BulletinNotesApiTests(TestCase):
 			'/api/academique/configuration',
 			data=json.dumps({
 				'action': 'evaluation', 'enseignement_id': enseignement_response.json()['enseignement_id'],
-				'titre': 'Contrôle', 'periode': 'trimestre_1', 'note_sur': '20',
+				'titre': 'Contrôle', 'periode': 'semestre_3', 'note_sur': '20',
 			}),
 			content_type='application/json',
 		)
