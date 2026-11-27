@@ -1,4 +1,4 @@
-from django.db.models import Sum, Count
+from django.db.models import Sum, Count, Q
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
@@ -8,6 +8,13 @@ from .helpers import get_annee_courante
 from .auth import require_auth
 
 
+def _niveaux_stats(annee):
+    niveaux_qs = (Classe.objects.order_by('niveau')
+                  .values('niveau')
+                  .annotate(nb=Count('eleve', filter=Q(eleve__annee=annee))))
+    return [{'niveau': row['niveau'] or 'Non défini', 'nb': int(row['nb'])} for row in niveaux_qs]
+
+
 @api_view(['GET'])
 @require_auth
 def dashboard_view(request):
@@ -15,7 +22,7 @@ def dashboard_view(request):
     if not annee:
         empty = {'stats': {'totalEntrees': 0, 'totalSorties': 0, 'solde': 0, 'nbEleves': 0,
                             'nbInscriptions': 0, 'nbAgents': 0, 'nbClasses': 0, 'nbAnnees': 0},
-                  'annee': None, 'recentEntrees': [], 'niveaux': []}
+                  'annee': None, 'recentEntrees': [], 'niveaux': _niveaux_stats(None)}
         return Response(DashboardSerializer(empty).data)
 
     total_entrees = int(Entree.objects.filter(annee=annee).aggregate(t=Sum('montant'))['t'] or 0)
@@ -26,10 +33,7 @@ def dashboard_view(request):
     nb_classes = Classe.objects.count()
     nb_annees = AnneeScolaire.objects.count()
 
-    niveaux_qs = (Eleve.objects.filter(annee=annee)
-                  .values('classe__niveau')
-                  .annotate(nb=Count('id')))
-    niveaux = [{'niveau': r['classe__niveau'] or 'Non défini', 'nb': int(r['nb'])} for r in niveaux_qs]
+    niveaux = _niveaux_stats(annee)
 
     recent = Entree.objects.filter(annee=annee).order_by('-created_at')[:5]
 

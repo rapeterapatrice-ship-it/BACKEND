@@ -7,6 +7,14 @@ from .auth import check_password, hash_password, get_current_user, require_acade
 from .helpers import get_param
 
 
+def application_profile():
+    return {
+        'nomEtablissement': get_param('nom_etablissement', 'EduFinance'),
+        'themeCouleur': get_param('theme_couleur', 'green'),
+        'logoUrl': get_param('logo_url', ''),
+    }
+
+
 @api_view(['POST'])
 def login_view(request):
     payload = LoginSerializer(data=request.data)
@@ -35,7 +43,11 @@ def login_view(request):
         else '/parent/presences' if user.role == 'parent'
         else '/entree'
     )
-    return Response({'user': SessionUserSerializer(user).data, 'redirect': redirect_to})
+    return Response({
+        'user': SessionUserSerializer(user).data,
+        'redirect': redirect_to,
+        **application_profile(),
+    })
 
 
 @api_view(['POST'])
@@ -47,13 +59,9 @@ def logout_view(request):
 @api_view(['GET'])
 def me_view(request):
     user = get_current_user(request)
-    if not user:
-        return Response({'user': None})
     return Response({
-        'user': SessionUserSerializer(user).data,
-        'nomEtablissement': get_param('nom_etablissement', 'EduFinance'),
-        'themeCouleur': get_param('theme_couleur', 'green'),
-        'logoUrl': get_param('logo_url', ''),
+        'user': SessionUserSerializer(user).data if user else None,
+        **application_profile(),
     })
 
 

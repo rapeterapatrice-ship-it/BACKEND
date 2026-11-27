@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 from datetime import datetime, time, timedelta
+from unittest.mock import patch
 from importlib import import_module
 from zoneinfo import ZoneInfo
 
@@ -18,6 +19,7 @@ from .models import (
 	Utilisateur,
 )
 from .payment_logic import calculate_eleve_status, get_mois_facturables
+from .auth import hash_password
 
 
 class EtatAccountTests(TestCase):
@@ -43,6 +45,88 @@ class EtatAccountTests(TestCase):
 		self.assertEqual(response.json()['totalEntrees'], 25)
 		self.assertEqual(response.json()['totalSorties'], 12.5)
 		self.assertEqual(response.json()['solde'], 12.5)
+
+
+class DashboardLevelStatsTests(TestCase):
+	def setUp(self):
+		self.admin = Utilisateur.objects.create(
+			prenom='Admin', nom='Tableau', username='admin-dashboard', password='unused', role='admin',
+		)
+		self.annee = AnneeScolaire.objects.create(libelle='2026-2027', courante=True)
+		self.ancienne_annee = AnneeScolaire.objects.create(libelle='2025-2026')
+		self.classe_primaire = Classe.objects.create(nom='CP', niveau='Primaire')
+		self.classe_college = Classe.objects.create(nom='6e', niveau='Collège')
+		self.classe_lycee = Classe.objects.create(nom='Seconde', niveau='Lycée')
+		Eleve.objects.create(
+			numero='260001', prenom='Tiana', nom='Test',
+			classe=self.classe_primaire, annee=self.annee,
+		)
+		Eleve.objects.create(
+			numero='250001', prenom='Mialy', nom='Test',
+			classe=self.classe_lycee, annee=self.ancienne_annee,
+		)
+		session = self.client.session
+		session['user_id'] = self.admin.id
+		session.save()
+
+	def test_dashboard_includes_each_configured_level_and_counts_only_current_year(self):
+		response = self.client.get('/api/dashboard')
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(
+			{row['niveau']: row['nb'] for row in response.json()['niveaux']},
+			{'Primaire': 1, 'Collège': 0, 'Lycée': 0},
+		)
+
+	def test_dashboard_keeps_all_levels_when_no_school_year_is_active(self):
+		AnneeScolaire.objects.filter(courante=True).update(courante=False)
+
+		response = self.client.get('/api/dashboard')
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(
+			{row['niveau']: row['nb'] for row in response.json()['niveaux']},
+			{'Primaire': 0, 'Collège': 0, 'Lycée': 0},
+		)
+
+
+class ApplicationProfileTests(TestCase):
+	def setUp(self):
+		self.user = Utilisateur.objects.create(
+			prenom='Agent', nom='Test', username='agent-profile',
+			password=hash_password('secret123'), role='agent',
+		)
+		Parametre.objects.update_or_create(
+			cle='nom_etablissement', defaults={'valeur': 'École Exemple'},
+		)
+		Parametre.objects.update_or_create(
+			cle='theme_couleur', defaults={'valeur': 'blue'},
+		)
+		Parametre.objects.update_or_create(
+			cle='logo_url', defaults={'valeur': '/api/media/uploads/logo.png'},
+		)
+
+	def assert_application_profile(self, payload):
+		self.assertEqual(payload['nomEtablissement'], 'École Exemple')
+		self.assertEqual(payload['themeCouleur'], 'blue')
+		self.assertEqual(payload['logoUrl'], '/api/media/uploads/logo.png')
+
+	def test_unauthenticated_auth_check_returns_shared_application_profile(self):
+		response = self.client.get('/api/auth/me')
+
+		self.assertEqual(response.status_code, 200)
+		self.assertIsNone(response.json()['user'])
+		self.assert_application_profile(response.json())
+
+	def test_login_returns_the_same_shared_application_profile(self):
+		response = self.client.post(
+			'/api/auth/login',
+			data=json.dumps({'username': self.user.username, 'password': 'secret123'}),
+			content_type='application/json',
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.assert_application_profile(response.json())
 
 
 class PresenceViewsTests(TestCase):
@@ -1202,7 +1286,9 @@ class RetardPaymentLogicTests(TestCase):
 		self.assertEqual(status['moisImpayesNonEchusNoms'], ['Octobre'])
 
 	def test_en_retard_endpoint_returns_success(self):
-		response = self.client.get('/api/retards/en-retard')
+		with patch('core.views_retards.datetime') as mock_datetime:
+			mock_datetime.now.return_value = datetime(2026, 10, 1)
+			response = self.client.get('/api/retards/en-retard')
 
 		self.assertEqual(response.status_code, 200)
 		self.assertEqual(response.json()['eleves'][0]['moisImpayésNoms'], 'Septembre')
